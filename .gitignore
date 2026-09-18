@@ -15,3 +15,8 @@ __pycache__/
 *.jpeg
 *.png
 *.heic
+
+# ...but the boot splash's artwork is a build input, not a screenshot: the theme
+# is useless without it, so it is tracked.  Regenerate with
+# tools/make-liuqin-plymouth-watermark.sh.
+!device/gnome-overlay/usr/share/plymouth/themes/liuqin/watermark.png

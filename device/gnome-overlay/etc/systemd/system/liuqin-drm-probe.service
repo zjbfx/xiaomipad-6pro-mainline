@@ -1,0 +1,28 @@
+# Plymouth's DRM renderer refuses to use a connector with no modes, and it
+# queries connectors before it takes DRM master, so on this port it never
+# probes them itself: with CONFIG_DRM_CLIENT_DEFAULT="log" nothing else does
+# either at boot, and the boot splash ends up with nowhere to draw.
+#
+# Writing "detect" to the connector's status attribute (drm_sysfs.c
+# status_store) calls connector->funcs->fill_modes() with no DRM master
+# check, which populates connector->modes without touching the CRTC.  That
+# is all Plymouth needs; it does its own modeset once it has a head, and
+# that modeset is what finally lights the panel.
+#
+# This has to stay a userspace probe rather than drm_client_lib.active=fbdev:
+# fbdev modesets the panel at ~2s, before the panel's shared TDDI has
+# finished powering up, and the Novatek touch IC then never leaves
+# RESET_STATE_INIT (0xA0) and fails closed.
+[Unit]
+Description=Probe the DSI connector so Plymouth can find a mode
+DefaultDependencies=no
+After=systemd-udev-trigger.service
+Before=plymouth-start.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/sh -c 'for c in /sys/class/drm/card*-DSI-*; do [ -w "$c/status" ] && echo detect > "$c/status"; done'
+
+[Install]
+WantedBy=sysinit.target
