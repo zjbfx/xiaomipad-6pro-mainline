@@ -1,6 +1,8 @@
-# Ubuntu for Xiaomi Pad 6 Pro
+# Ubuntu and Fedora for Xiaomi Pad 6 Pro
 
-Run Ubuntu 26.04 on the Xiaomi Pad 6 Pro, with the GNOME desktop and a device-adapted kernel based on upstream Linux. [中文](README.zh-CN.md)
+Run Ubuntu 26.04 or Fedora Workstation on the Xiaomi Pad 6 Pro, with the GNOME desktop and a device-adapted kernel based on upstream Linux. [中文](README.zh-CN.md)
+
+This repository is a fork of [yzddmr6/xiaomipad-6pro-mainline](https://github.com/yzddmr6/xiaomipad-6pro-mainline) that adds a Fedora Workstation variant. The kernel, boot images, device layer and installation flow are shared between the two; only the root filesystem and the way the device layer is packaged differ.
 
 ## Latest Release and Recent Updates
 
@@ -43,10 +45,30 @@ Use a complete installation bundle from [GitHub Releases](https://github.com/yzd
 | I want to | Read |
 |---|---|
 | Install Ubuntu | [Installation guide](docs/FLASHING.md) |
+| Install Fedora Workstation | [Fedora guide](docs/FEDORA.zh-CN.md) (Chinese for now) |
 | Build the kernel and device components | [Build guide](docs/BUILD.md) |
 | Restore Android | [Data and recovery instructions](docs/FLASHING.md#data-and-recovery) |
 
 Prebuilt installation bundles include matching boot and root filesystem images, installation tools and checksums.
+Ubuntu bundles are published on the upstream project's [Releases](https://github.com/yzddmr6/xiaomipad-6pro-mainline/releases) page; the Fedora root filesystem is built locally from the official Fedora aarch64 repositories.
+
+## 🐧 Fedora Workstation (first version)
+
+Fedora Workstation on the same kernel and device support, built and used on the same reference device as the Ubuntu path (single boot, known 256 GB layout). Treat it as a first version: the desktop is usable, the edges are documented rather than smoothed.
+
+| | |
+|---|---|
+| Base | Fedora Workstation 44, GNOME, aarch64, installed with `dnf --installroot` from official repositories only |
+| Boot chain | Identical to the Ubuntu path: same kernel, device trees, boot image assembly, storage admission contract and installer image |
+| Device layer | Installed as a file tree rather than as packages; the admission contract pins file hashes, not a package database |
+| Packages | DNF |
+| Waydroid | Ubuntu path only; not covered here |
+
+Tools: [build-liuqin-fedora-rootfs.sh](tools/build-liuqin-fedora-rootfs.sh) for the root filesystem, [build-liuqin-fedora-native-root.sh](tools/build-liuqin-fedora-native-root.sh) for the device layer, preflight and packing, and `build-liuqin-image.py --distro fedora` for the images. The [Fedora guide](docs/FEDORA.zh-CN.md) covers the design, the build and the differences from the Ubuntu path.
+
+Validated on the reference device: first boot, GDM login, desktop, Wi-Fi, touch, and the boot screens coming up landscape from the first frame (the boot command line declares the panel's mounting, so boot, Plymouth and the greeter no longer flip orientation mid-boot).
+
+Not yet validated on Fedora: audio, Bluetooth, the magnetic keyboard, suspend/resume, USB OTG and anything marked partial or unverified in the tables below.
 
 ## Hardware Support
 
@@ -123,10 +145,10 @@ Verified features at a glance; see the table below for the scope of each:
 
 ## Usage and Maintenance
 
-Ubuntu packages are managed through APT. Update instructions for the project kernel and device components will accompany each installation release.
+Ubuntu packages are managed through APT and Fedora's through DNF. Update instructions for the project kernel and device components will accompany each installation release.
 Do not mix boot images and system components from different releases.
 
-To run Android applications inside Ubuntu, Waydroid is supported; the required kernel configuration is built in. See [Waydroid support](docs/WAYDROID.md).
+To run Android applications inside Ubuntu, Waydroid is supported; the required kernel configuration is built in. See [Waydroid support](docs/WAYDROID.md). Waydroid is not covered by the Fedora path.
 
 Charging power is negotiated through the vendor charger authentication path. See [Fast charging](docs/FASTCHARGE.md).
 
@@ -148,7 +170,7 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Acknowledgments and Licensing
 
 This project builds on the kernel work of [sm8450-mainline](https://github.com/sm8450-mainline/linux),
-along with Ubuntu, GNOME, Freedreno and the Linux Qualcomm community.
+along with Ubuntu, Fedora, GNOME, Freedreno and the Linux Qualcomm community.
 
 Original project code is MIT-licensed unless a file states otherwise. Linux and third-party components retain their own licenses;
 firmware is subject to its respective owners' terms. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
