@@ -26,8 +26,11 @@ logos=${FEDORA_LOGOS:-/usr/share/fedora-logos}
 out="$(dirname "$0")/../device/gnome-overlay/usr/share/plymouth/themes/liuqin/watermark.png"
 
 # Plymouth draws the watermark at its native pixel size, into two-step's
-# logical 900x1440 space on this device (the DRM head is 1800x2880 physical at
-# device scale 2), so a number here is half that many physical pixels.
+# logical space on this device: 1440x900, because the panel is mounted rotated
+# and the cmdline declares panel_orientation=right_side_up (the DRM head is
+# 1800x2880 physical at device scale 2).  A number here is therefore twice that
+# many physical pixels.  Width 152 puts the lockup at 10.6% of the logical
+# width; the theme's .96 vertical alignment sits it near the bottom edge.
 case $width in
 	''|*[!0-9]*) echo "usage: $0 [width]" >&2; exit 2 ;;
 esac
