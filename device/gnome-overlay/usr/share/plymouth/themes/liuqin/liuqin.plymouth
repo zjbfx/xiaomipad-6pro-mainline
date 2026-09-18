@@ -13,8 +13,11 @@ TitleHorizontalAlignment=.5
 TitleVerticalAlignment=.382
 HorizontalAlignment=.5
 VerticalAlignment=.64
+# Sit the wordmark at the bottom, the way Fedora's own bgrt theme does.  The
+# plugin places it at (screen - watermark) * alignment, not centre-at, and
+# Fedora's value is .96, so this is the same inset it has.
 WatermarkHorizontalAlignment=.5
-WatermarkVerticalAlignment=.5
+WatermarkVerticalAlignment=.96
 Transition=none
 TransitionDuration=0.0
 BackgroundStartColor=0x000000
