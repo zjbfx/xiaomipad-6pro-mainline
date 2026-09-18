@@ -595,7 +595,28 @@ def main(argv=None):
                 (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()))
         base = f'http://{args.host_address}:{server.server_port}'
         install = install_root_command(boot_id, base, bundle, manifest, args, rom_images)
-        print('Installing Ubuntu into ' + layout.ROOT_NAME + '.', flush=True)
+        # A released installer.img embeds an install-root.sh and a root contract
+        # of its own vintage, and the contract is the sharper of the two: it pins
+        # the hashes of files this project builds per distribution, so a root the
+        # image predates -- the Fedora port is exactly that case -- is failed by
+        # checks it can no longer satisfy.  A bundle carrying both therefore
+        # ships them to the device from the server it already pulls rootfs.tar.gz
+        # from, checks them by digest, installs the contract and runs the fetched
+        # script in place of the embedded one.  Fetch, checks and contract
+        # install are one script so the line stays inside the RAM shell's limit.
+        script, contract = bundle / 'install-root.sh', bundle / 'native-root.contract'
+        if script.is_file() and contract.is_file():
+            fetch = ('b=/bin/busybox; mkdir -p /run;'
+                     f' $b wget -q -O /run/i {base}/install-root.sh &&'
+                     f' $b wget -q -O /run/c {base}/native-root.contract &&'
+                     f' [ "$($b sha256sum /run/i|$b cut -c1-64)" = {sha(script)} ] &&'
+                     f' [ "$($b sha256sum /run/c|$b cut -c1-64)" = {sha(contract)} ] &&'
+                     ' cp /run/c /etc/liuqin-native-root.contract'
+                     ' || { echo "liuqin-install: fetch or verify failed" >&2; exit 1; }')
+            remote(fetch)
+            install[1] = '/run/i'
+        distribution = 'Fedora' if manifest.get('distro') == 'fedora' else 'Ubuntu'
+        print('Installing ' + distribution + ' into ' + layout.ROOT_NAME + '.', flush=True)
         result = remote(shlex.join(install), 3600)
         if b'liuqin-install: ROOT_INSTALLED' not in result:
             raise RuntimeError('Device did not confirm root installation')

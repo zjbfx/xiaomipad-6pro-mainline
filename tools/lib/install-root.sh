@@ -253,8 +253,13 @@ fi
 	printf 'LABEL=LIUQIN_HOME\t/home\text4\tdefaults,nofail,x-systemd.device-timeout=30s\t0\t2\n'
 } >/mnt/install/native-root/etc/fstab
 chmod 0644 /mnt/install/native-root/etc/fstab
-[ -n "$(/usr/sbin/getcap /mnt/install/native-root/usr/lib/snapd/snap-confine)" ] ||
-	die 'snap-confine capability was not restored'
+# The snap-confine capability travels through security.capability xattrs, so its
+# survival proves the extraction preserved them.  A root without snapd (Fedora)
+# has nothing to prove here and is not failed for the absence.
+if [ -e /mnt/install/native-root/usr/lib/snapd/snap-confine ]; then
+	[ -n "$(/usr/sbin/getcap /mnt/install/native-root/usr/lib/snapd/snap-confine)" ] ||
+		die 'snap-confine capability was not restored'
+fi
 # Verify immutable boot-contract files after extraction and provisioning.
 tail -n +2 /etc/liuqin-native-root.contract | while read -r expected path; do
 	[ -n "$expected" ] || continue

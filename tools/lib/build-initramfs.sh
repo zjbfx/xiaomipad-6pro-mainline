@@ -83,6 +83,30 @@ dsp_firmware_count=68
 dsp_firmware_set_sha256=7f9b43d3815b6592f541e0b870357010488980bc040b925e93bbf12d01282908
 slot_success_source="$project_root/device/boot/liuqin-mark-slot-successful.c"
 slot_success_gcc=$(command -v "${SLOT_SUCCESS_GCC:-aarch64-linux-gnu-gcc}" || true)
+
+# Two compiler properties of the host decide how the initramfs helpers below are
+# linked; both are probed rather than assumed.  Fedora's cross compiler is built
+# without a default sysroot -- the glibc headers and startup objects live in a
+# release-versioned sysroot package, so the compile has to name that directory.
+# And Fedora's gcc driver appends -latomic_asneeded to every link, a name this
+# cross toolchain has no aarch64 library for; the flag that switches it off
+# exists only on that patch level, which the probe covers.
+cross_sysroot=${CROSS_SYSROOT:-}
+if [ -z "$cross_sysroot" ] && [ -n "$slot_success_gcc" ]; then
+	for candidate in /usr/aarch64-redhat-linux/sys-root/*; do
+		if [ -d "$candidate/usr/include" ]; then
+			cross_sysroot=$candidate
+			break
+		fi
+	done
+fi
+cross_sysroot_flag=
+[ -z "$cross_sysroot" ] || cross_sysroot_flag="--sysroot=$cross_sysroot"
+atomic_flag=
+if [ -n "$slot_success_gcc" ] &&
+	"$slot_success_gcc" -fno-link-libatomic -x c -E /dev/null >/dev/null 2>&1; then
+	atomic_flag=-fno-link-libatomic
+fi
 charger_mode_source="$project_root/device/charger-mode/liuqin-charger-mode"
 charger_key_source="$project_root/device/charger-mode/liuqin-charger-mode-power-key.c"
 charger_exit_source="$project_root/device/charger-mode/liuqin-charger-mode-exit.c"
@@ -172,12 +196,15 @@ if [ ! -x "$busybox" ]; then
 	exit 1
 fi
 
-if ! readelf -h "$busybox" | grep -q 'Machine:.*AArch64'; then
+# readelf is gettext-aware: under a non-English host locale it labels its output
+# in that language ("系统架构: AArch64"), and the pattern below matches nothing,
+# which reads as "not an AArch64 executable".  Pin the C locale.
+if ! LC_ALL=C readelf -h "$busybox" | grep -q 'Machine:.*AArch64'; then
 	echo "error: BusyBox is not an AArch64 executable: $busybox" >&2
 	exit 1
 fi
 
-if readelf -l "$busybox" | grep -q 'INTERP'; then
+if LC_ALL=C readelf -l "$busybox" | grep -q 'INTERP'; then
 	echo "error: BusyBox is dynamically linked: $busybox" >&2
 	exit 1
 fi
@@ -459,11 +486,12 @@ if [ "$storage_mode" = persistent ]; then
 		cp "$native_root_contract" "$staging/etc/liuqin-native-root.contract"
 		chmod 0644 "$staging/etc/liuqin-native-root.contract"
 	fi
-	"$slot_success_gcc" -static -Os -s "$slot_success_source" \
+	# shellcheck disable=SC2086 # the two flags are empty when unavailable
+	"$slot_success_gcc" $cross_sysroot_flag $atomic_flag -static -Os -s "$slot_success_source" \
 		-o "$staging/bin/liuqin-mark-slot-successful"
 	chmod 0755 "$staging/bin/liuqin-mark-slot-successful"
-	if ! readelf -h "$staging/bin/liuqin-mark-slot-successful" | grep -q 'Machine:.*AArch64' ||
-		readelf -l "$staging/bin/liuqin-mark-slot-successful" | grep -q INTERP; then
+	if ! LC_ALL=C readelf -h "$staging/bin/liuqin-mark-slot-successful" | grep -q 'Machine:.*AArch64' ||
+		LC_ALL=C readelf -l "$staging/bin/liuqin-mark-slot-successful" | grep -q INTERP; then
 		echo "error: slot-success helper is not a static AArch64 ELF" >&2
 		exit 1
 	fi
@@ -478,11 +506,12 @@ if [ "$charger_mode" = 1 ]; then
 		key) charger_source=$charger_key_source; charger_output=liuqin-charger-mode-power-key ;;
 		exit) charger_source=$charger_exit_source; charger_output=liuqin-charger-mode-exit ;;
 		esac
-		"$slot_success_gcc" -static -Os -s -Wall -Wextra -Werror \
+		# shellcheck disable=SC2086 # the two flags are empty when unavailable
+		"$slot_success_gcc" $cross_sysroot_flag $atomic_flag -static -Os -s -Wall -Wextra -Werror \
 			"$charger_source" -o "$staging/bin/$charger_output"
 		chmod 0755 "$staging/bin/$charger_output"
-		if ! readelf -h "$staging/bin/$charger_output" | grep -q 'Machine:.*AArch64' ||
-			readelf -l "$staging/bin/$charger_output" | grep -q INTERP; then
+		if ! LC_ALL=C readelf -h "$staging/bin/$charger_output" | grep -q 'Machine:.*AArch64' ||
+			LC_ALL=C readelf -l "$staging/bin/$charger_output" | grep -q INTERP; then
 			echo "error: $charger_output is not a static AArch64 ELF" >&2
 			exit 1
 		fi

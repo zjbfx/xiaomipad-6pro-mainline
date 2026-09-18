@@ -58,6 +58,26 @@ INPUTS = {
     'FINGERPRINT_BUNDLE',
 }
 
+# The Fedora assembly reuses everything distribution-neutral — kernel modules,
+# board firmware, audio topology, WLAN set, stock DTBO/DTB inputs, boot image —
+# and replaces only the two Ubuntu-shaped pieces: the base tree it starts from,
+# and the five .deb device packages with the file tree the Fedora assembler
+# installs.  installer.img stays a released artefact: it is the ephemeral RAM
+# environment used to install, not part of the system being installed.
+INPUTS_FEDORA = {
+    'FEDORA_ROOTFS_ROOT', 'FEDORA_ROOTFS_MANIFEST', 'FIRMWARE_POOL', 'FIRMWARE_TREE',
+    'AUDIO_TOPOLOGY', 'WLAN_HSP2_TUPLE', 'STOCK_OVERLAY_DIR', 'STOCK_BASE_DIR',
+    'SENSOR_STACK_TAR', 'SENSOR_STACK_SHA256', 'POWER_SETTINGS_BINARY',
+    'MKBOOTIMG_DIR', 'INSTALLER_IMG',
+}
+
+# The power panel (a gnome-control-center carrying the button-policy patch) is a
+# desktop convenience that no admission gate looks at.  The Fedora root
+# assembler treats its absence as a warning; the assembly does the same, so an
+# image without it is a working tablet whose Power panel lacks the project's
+# controls rather than a bundle that cannot be built.
+OPTIONAL_FEDORA = {'POWER_SETTINGS_BINARY'}
+
 
 def main():
     project = Path(__file__).resolve().parents[1]
@@ -68,17 +88,28 @@ def main():
     parser.add_argument('--kernel-source', type=Path,
                         default=project.parent / 'linux-sm8450-liuqin')
     parser.add_argument('--out', type=Path, default=project / 'out/image')
-    parser.add_argument('--stage', choices=['all', 'modules', 'debs', 'copy', 'install',
-                                          'assemble', 'manifest', 'boot', 'runtime', 'installer',
-                                          'pack', 'bundle', 'release-assets'], default='all')
+    parser.add_argument('--stage', choices=['all', 'modules', 'debs', 'device', 'copy', 'install',
+                                          'assemble', 'preflight', 'manifest', 'boot', 'runtime',
+                                          'installer', 'pack', 'bundle', 'release-assets'],
+                        default='all')
+    parser.add_argument('--distro', choices=['ubuntu', 'fedora'], default='ubuntu',
+                        help='Which userspace the root is assembled from (default: ubuntu)')
     parser.add_argument('--device-tested', action='store_true',
                         help='Mark release assets after completing device installation tests')
     args = parser.parse_args()
     if args.device_tested and args.stage != 'release-assets':
         parser.error('--device-tested is only valid with --stage release-assets')
-    supplied = json.loads(args.inputs.read_text())
-    if set(supplied) != INPUTS or not all(isinstance(v, str) and v for v in supplied.values()):
-        parser.error('Input keys must match: ' + ', '.join(sorted(INPUTS)))
+    inputs = INPUTS_FEDORA if args.distro == 'fedora' else INPUTS
+    optional = OPTIONAL_FEDORA if args.distro == 'fedora' else set()
+    # Keys starting with an underscore are documentation, not inputs: they let
+    # the shipped template explain itself without becoming part of the contract.
+    supplied = {key: value for key, value in json.loads(args.inputs.read_text()).items()
+                if not key.startswith('_')}
+    absent = sorted(inputs - optional - set(supplied))
+    if set(supplied) - inputs or absent or not all(isinstance(v, str) and v
+                                                   for v in supplied.values()):
+        parser.error('Input keys must match: ' + ', '.join(sorted(inputs)) +
+                     ('; missing ' + ', '.join(absent) if absent else ''))
     for key, value in supplied.items():
         if not key.endswith('_SHA256'):
             supplied[key] = str((args.inputs.resolve().parent / value).resolve())
@@ -123,21 +154,36 @@ def main():
                KERNEL_DIR=str(kernel_source), KERNEL_COMMIT=lock['commit'],
                KERNEL_OUT=str(kernel), KERNEL_IMAGE=str(kernel / 'arch/arm64/boot/Image'),
                KERNEL_DTB=str(kernel / 'arch/arm64/boot/dts' / lock['dtb']),
+               KERNEL_LAYER_ROOT=str(kernel / 'root'),
                KERNEL_MODULES_DIR=str(out / 'modules'), DEBS_DIR=str(out / 'debs'),
                NATIVE_ROOT_HASHES=str(out / 'root/native-root.hashes'))
     stages = {
         'modules': ('build-liuqin-kernel-modules.sh', [], out / 'modules'),
-        'debs': ('build-liuqin-debs.sh', ['all'], out / 'debs'),
-        'copy': ('build-liuqin-native-root.sh', ['copy'], out / 'root'),
-        'install': ('build-liuqin-native-root.sh', ['debs'], out / 'root'),
-        'assemble': ('build-liuqin-native-root.sh', ['assemble'], out / 'root'),
-        'manifest': ('build-liuqin-native-root.sh', ['manifest'], out / 'root'),
         'boot': ('build-liuqin-native-boot.sh', [], out / 'boot'),
-        'runtime': ('lib/build-installer-runtime.py', ['--root', supplied['UBUNTU_DESKTOP_ROOT'],
-                                                     '--out', str(out / 'installer-runtime')], out / 'installer-runtime'),
-        'installer': ('build-liuqin-native-boot.sh', [], out / 'installer'),
-        'pack': ('build-liuqin-native-root.sh', ['pack'], out / 'root'),
     }
+    if args.distro == 'fedora':
+        # No runtime/installer stages: the released installer image is reused,
+        # so deriving one from an Ubuntu tree is not part of this assembly.
+        stages.update({
+            'copy': ('build-liuqin-fedora-native-root.sh', ['copy'], out / 'root'),
+            'device': ('build-liuqin-fedora-native-root.sh', ['device'], out / 'root'),
+            'assemble': ('build-liuqin-fedora-native-root.sh', ['assemble'], out / 'root'),
+            'preflight': ('build-liuqin-fedora-native-root.sh', ['preflight'], out / 'root'),
+            'manifest': ('build-liuqin-fedora-native-root.sh', ['manifest'], out / 'root'),
+            'pack': ('build-liuqin-fedora-native-root.sh', ['pack'], out / 'root'),
+        })
+    else:
+        stages.update({
+            'debs': ('build-liuqin-debs.sh', ['all'], out / 'debs'),
+            'copy': ('build-liuqin-native-root.sh', ['copy'], out / 'root'),
+            'install': ('build-liuqin-native-root.sh', ['debs'], out / 'root'),
+            'assemble': ('build-liuqin-native-root.sh', ['assemble'], out / 'root'),
+            'manifest': ('build-liuqin-native-root.sh', ['manifest'], out / 'root'),
+            'runtime': ('lib/build-installer-runtime.py', ['--root', supplied['UBUNTU_DESKTOP_ROOT'],
+                                                         '--out', str(out / 'installer-runtime')], out / 'installer-runtime'),
+            'installer': ('build-liuqin-native-boot.sh', [], out / 'installer'),
+            'pack': ('build-liuqin-native-root.sh', ['pack'], out / 'root'),
+        })
     selected = [*stages, 'bundle'] if args.stage == 'all' else [args.stage]
     if args.stage == 'all' and out.exists():
         parser.error('all requires a fresh output; resume with --stage instead')
@@ -221,7 +267,8 @@ def main():
                     entry.external_attr = 0o644 << 16
                     archive.writestr(entry, (project / name).read_bytes())
             files = {'boot.img': out / 'boot/boot-liuqin-native.img',
-                     'installer.img': out / 'installer/boot-liuqin-native.img',
+                     'installer.img': (Path(supplied['INSTALLER_IMG']) if args.distro == 'fedora'
+                                       else out / 'installer/boot-liuqin-native.img'),
                      'rootfs.tar.gz': out / 'root/rootfs.tar.gz',
                      'install.py': project / 'tools/install-liuqin.py',
                      'liuqin_layout.py': project / 'tools/lib/liuqin_layout.py',
@@ -233,6 +280,17 @@ def main():
                      'FINGERPRINT.md': project / 'docs/FINGERPRINT.md',
                      'FINGERPRINT.zh-CN.md': project / 'docs/FINGERPRINT.zh-CN.md',
                      'fingerprint-build-inputs.tar.gz': Path(supplied['FINGERPRINT_BUNDLE'])}
+            if args.distro == 'fedora':
+                # The released installer.img carries an install-root.sh and a
+                # root contract of its own vintage, and the contract is the
+                # sharper of the two: it pins the hashes of files this project
+                # builds per distribution, so the Ubuntu one can never admit a
+                # Fedora root.  Both travel in the bundle instead, and
+                # install.py fetches them by digest from the same server the
+                # device already pulls rootfs.tar.gz from.  The Ubuntu path
+                # keeps the copies embedded in the image it builds itself.
+                files['install-root.sh'] = project / 'tools/lib/install-root.sh'
+                files['native-root.contract'] = out / 'boot/native-root.contract'
             if imported:
                 proof = out / 'kernel-build-proof.zip'
                 proof_files = [kernel / 'build-info.json', kernel / 'SHA256SUMS',
@@ -254,6 +312,11 @@ def main():
                 with source.open('rb') as stream:
                     hashes[name] = hashlib.file_digest(stream, 'sha256').hexdigest()
             metadata = {'device': 'liuqin', 'status': 'OFFLINE_ASSEMBLED',
+                        # What the root filesystem in this bundle is, so that
+                        # install.py can say which system it is writing and reach
+                        # for the right install-root.sh without inferring either
+                        # from the files it happens to find.
+                        'distro': args.distro,
                         'kernel_commit': lock['commit'],
                         'project_commit': subprocess.check_output(['git', '-C', str(project), 'rev-parse', 'HEAD'], env=env, text=True).strip(),
                         'project_dirty': bool(subprocess.check_output(['git', '-C', str(project), 'status', '--porcelain'], env=env)),
@@ -269,6 +332,17 @@ def main():
         script, arguments, destination = stages[stage]
         print('Stage: ' + stage, flush=True)
         stage_env = dict(env, OUT_DIR=str(destination))
+        if script == 'build-liuqin-fedora-native-root.sh':
+            # One firmware tree, two consumers with different shapes.  The root
+            # assembler installs the prepared /usr/lib/firmware closure; the
+            # initramfs builder underneath the boot stage reads the raw vendor
+            # pool.  FIRMWARE_TREE keeps one meaning in both profiles -- the
+            # tree build-liuqin-firmware-prep.sh emits -- so the closure is
+            # derived here rather than left to whoever writes the input file.
+            closure = Path(supplied['FIRMWARE_TREE']) / 'usr/lib/firmware'
+            if not closure.is_dir():
+                parser.error('FIRMWARE_TREE carries no firmware closure: ' + str(closure))
+            stage_env['FIRMWARE_POOL'] = str(closure)
         if stage == 'installer':
             stage_env['INSTALLER_RUNTIME'] = str(out / 'installer-runtime')
         subprocess.run(['python3' if script.endswith('.py') else 'sh',
