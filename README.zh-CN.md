@@ -1,6 +1,8 @@
-# Ubuntu for Xiaomi Pad 6 Pro
+# Ubuntu 与 Fedora for Xiaomi Pad 6 Pro
 
-在 Xiaomi Pad 6 Pro 上运行 Ubuntu 26.04 桌面，采用 GNOME 桌面环境与基于上游 Linux 的设备适配内核。[English](README.md)
+在 Xiaomi Pad 6 Pro 上运行 Ubuntu 26.04 或 Fedora Workstation 桌面，采用 GNOME 桌面环境与基于上游 Linux 的设备适配内核。[English](README.md)
+
+本仓库是 [yzddmr6/xiaomipad-6pro-mainline](https://github.com/yzddmr6/xiaomipad-6pro-mainline) 的 fork，新增 Fedora Workstation 支持。内核、启动镜像、设备层与安装流程两条路线共用，只有根文件系统来源与设备层的打包方式不同。
 
 ## 📮 关注与交流
 
@@ -32,10 +34,30 @@
 | 我想要 | 入口 |
 |---|---|
 | 安装 Ubuntu | [安装指南](docs/FLASHING.zh-CN.md) |
+| 安装 Fedora Workstation | [Fedora 指南](docs/FEDORA.zh-CN.md) |
 | 自行编译内核和设备组件 | [构建指南](docs/BUILD.zh-CN.md) |
 | 恢复 Android | [数据与恢复说明](docs/FLASHING.zh-CN.md#数据与恢复) |
 
 预编译安装包包括匹配的启动镜像、根文件系统、安装工具与校验文件。
+Ubuntu 安装包在上游项目的 [Releases](https://github.com/yzddmr6/xiaomipad-6pro-mainline/releases) 发布；Fedora 根文件系统由本仓库的工具在本机从 Fedora 官方 aarch64 仓库构建。
+
+## 🐧 Fedora Workstation 支持（第一版）
+
+Fedora Workstation 跑在**同一套内核与设备支持**上，已在与 Ubuntu 路线相同的真机上装成并日常使用（单系统、已知 256 GB 布局）。定位是第一版：桌面可用，边界照实写出来，不粉饰。
+
+| | |
+|---|---|
+| 基础 | Fedora Workstation 44、GNOME、aarch64，只用官方仓库，`dnf --installroot` 安装 |
+| 引导链 | 与 Ubuntu 路线完全一致：内核、设备树、boot 镜像组装、存储准入契约、安装器镜像全部复用 |
+| 设备层 | 按**文件树**安装而非软件包；准入契约钉的是文件哈希，不是包数据库 |
+| 软件包管理 | DNF |
+| Waydroid | 仅 Ubuntu 路线支持，Fedora 路线未覆盖 |
+
+工具：[build-liuqin-fedora-rootfs.sh](tools/build-liuqin-fedora-rootfs.sh)（根文件系统）、[build-liuqin-fedora-native-root.sh](tools/build-liuqin-fedora-native-root.sh)（设备层、preflight、打包）、`build-liuqin-image.py --distro fedora`（镜像）。设计与构建细节见 [Fedora 指南](docs/FEDORA.zh-CN.md)。
+
+真机已验证：首次安装、首次启动、GDM 登录、桌面、Wi-Fi、触摸，以及**开机画面从第一帧就是横屏**（启动命令行里声明了面板安装方向，boot、Plymouth 与登录界面不再中途翻转）。
+
+Fedora 路线尚未验证：声音、蓝牙、磁吸键盘、挂起恢复、USB OTG，以及下表里标为部分支持或未验证的项目。**自动旋转当前会指错方向**，见下方传感器一行。
 
 ## 硬件支持
 
@@ -83,7 +105,7 @@
 | 浏览器视频硬解 | 浏览器 / V4L2 接入 | 🧪 未验证 | 浏览器能播放视频不等于使用硬件解码 |
 | 硬件视频编码 | Qualcomm 视频引擎 | 🧪 未验证 | 尚未验证硬件编码工作流 |
 | 前后摄像头 | Qualcomm CAMSS / 相机传感器 | ❌ 不支持 | 尚无可用的相机采集与应用接入 |
-| 加速度计 / 自动旋转 | SLPI / SSC / iio-sensor-proxy | ✅ 可用 | 首次启动、登录界面、桌面横竖旋转与磁吸键盘横屏 |
+| 加速度计 / 自动旋转 | SLPI / SSC / iio-sensor-proxy | 🟡 部分支持 | 加速度计本身可用，但启动命令行现在声明了面板安装方向，桌面的"正立"参考系随之转了 90°，自动旋转因此指错方向，需要重新标定加速度计的 mount matrix；标定完成前，登录后会自动转到竖屏一下再回来 |
 | 陀螺仪 / 磁力计 | SSC 传感器链路 | 🧪 未验证 | 未确认应用可用的测量链路，不随自动旋转标为可用 |
 | 环境光传感器 | SSC 光感路径 | 🧪 未验证 | 尚未完成真实光照测量验收 |
 | 自动亮度 | 桌面亮度策略 | ❌ 不支持 | 尚未接通自动亮度控制 |
@@ -102,11 +124,11 @@
 
 ## 使用与维护
 
-Ubuntu 软件包通过 APT 管理。项目内核与设备组件的更新方式将随安装版本说明，
+Ubuntu 软件包通过 APT 管理，Fedora 通过 DNF 管理。项目内核与设备组件的更新方式将随安装版本说明，
 不要混用不同版本的启动镜像和系统组件。
 
 如需在 Ubuntu 中运行 Android 应用，可使用 Waydroid；所需内核配置已内置，
-见 [Waydroid 支持](docs/WAYDROID.zh-CN.md)。
+见 [Waydroid 支持](docs/WAYDROID.zh-CN.md)。Waydroid 未在 Fedora 路线覆盖。
 
 遇到问题时，请提供设备型号、系统版本、复现步骤和相关日志，并通过 GitHub Issues 反馈。
 提交日志前，请移除密码、网络凭据和个人信息。使用交流也可通过顶部的公众号与小红书进行。
@@ -125,7 +147,7 @@ Ubuntu 软件包通过 APT 管理。项目内核与设备组件的更新方式�
 ## 致谢与许可证
 
 本项目基于 [sm8450-mainline](https://github.com/sm8450-mainline/linux) 的内核工作，
-并使用 Ubuntu、GNOME、Freedreno 和 Linux Qualcomm 社区的成果。
+并使用 Ubuntu、Fedora、GNOME、Freedreno 和 Linux Qualcomm 社区的成果。
 
 除文件另有声明外，项目原创代码采用 MIT 许可证。Linux 内核及第三方组件保留各自许可证；
 固件适用其权利人的授权条款。详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
