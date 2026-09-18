@@ -220,6 +220,21 @@ stage_device() {
 			cp -a "$overlay/$entry" "$root/$entry"
 		done
 
+	# The two-step splash plugin reads more than the watermark out of its
+	# ImageDir: the throbber frames are the boot animation and the dialog
+	# artwork is what the password prompt draws with.  They are Fedora's own
+	# spinner artwork, so take it from the installed theme rather than
+	# vendoring a second copy of it in the overlay.
+	liuqin_theme=$root/usr/share/plymouth/themes/liuqin
+	spinner_theme=$root/usr/share/plymouth/themes/spinner
+	if [ -d "$spinner_theme" ]; then
+		for asset in throbber-*.png bullet.png capslock.png entry.png \
+			keyboard.png keymap-render.png lock.png; do
+			[ -f "$spinner_theme/$asset" ] || continue
+			cp -f "$spinner_theme/$asset" "$liuqin_theme/"
+		done
+	fi
+
 	# The overlay's /etc/dconf/profile/gdm is shaped for Ubuntu, where the
 	# packaged profile stacks only user-db:user and the shipped file-db, so a
 	# local override is the only slot for /etc/dconf/db/gdm.d.  Fedora's packaged
@@ -360,6 +375,10 @@ stage_assemble() {
 	link_unit multi-user.target.wants liuqin-gnome-usb-rescue.service
 	link_unit multi-user.target.wants liuqin-power-keyd.service
 	link_unit graphical.target.wants liuqin-backlight-default.service
+	# sysinit, not the graphical targets: the probe only has to beat
+	# plymouth-start, and it must not run after the greeter has already
+	# taken DRM master.
+	link_unit sysinit.target.wants liuqin-drm-probe.service
 
 	# Obsolete activation paths: the Bluetooth helper is a dependency of the
 	# preconfigure unit now, and a leftover link would start it too early.
@@ -487,7 +506,8 @@ stage_preflight() {
 		"basic.target.requires/liuqin-gnome-storage-guard.service ../liuqin-gnome-storage-guard.service" \
 		"multi-user.target.wants/liuqin-gnome-usb-rescue.service ../liuqin-gnome-usb-rescue.service" \
 		"multi-user.target.wants/liuqin-power-keyd.service ../liuqin-power-keyd.service" \
-		"graphical.target.wants/liuqin-backlight-default.service ../liuqin-backlight-default.service"; do
+		"graphical.target.wants/liuqin-backlight-default.service ../liuqin-backlight-default.service" \
+		"sysinit.target.wants/liuqin-drm-probe.service ../liuqin-drm-probe.service"; do
 		set -- $link
 		actual=$(readlink "$root/etc/systemd/system/$1" 2>/dev/null || true)
 		[ "$actual" = "$2" ] || {
@@ -495,6 +515,24 @@ stage_preflight() {
 			failed=1
 		}
 	done
+
+	# Without the watermark the splash still loads, but the boot screen is a
+	# blank rectangle; without the throbber the two-step plugin has no
+	# animation to start.  Both are cheap to check here and expensive to
+	# notice on the tablet.
+	for asset in liuqin.plymouth watermark.png throbber-0001.png; do
+		[ -f "$root/usr/share/plymouth/themes/liuqin/$asset" ] || {
+			printf '  Plymouth theme asset missing: %s\n' "$asset" >&2
+			failed=1
+		}
+	done
+	if [ -f "$root/usr/share/plymouth/themes/liuqin/liuqin.plymouth" ]; then
+		grep -q '^ImageDir=/usr/share/plymouth/themes/liuqin$' \
+			"$root/usr/share/plymouth/themes/liuqin/liuqin.plymouth" || {
+			printf '  Plymouth theme ImageDir does not point at the theme directory\n' >&2
+			failed=1
+		}
+	fi
 	[ "$(readlink "$root/usr/sbin/init" 2>/dev/null || true)" = ../lib/systemd/systemd ] || {
 		printf '  /usr/sbin/init is not the systemd symlink\n' >&2
 		failed=1
