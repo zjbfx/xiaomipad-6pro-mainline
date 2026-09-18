@@ -870,15 +870,30 @@ mdev -s
 
 log "waiting for SCSI/UFS block devices and marking them read-only"
 found_block=false
+previous_count=
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
 	mdev -s
+	seen_this_pass=0
 	for blockdev_path in /dev/sd*; do
 		[ -b "$blockdev_path" ] || continue
 		found_block=true
+		seen_this_pass=$((seen_this_pass + 1))
 		if ! blockdev --setro "$blockdev_path"; then
 			log "warning: failed to mark read-only: $blockdev_path"
 		fi
 	done
+	# UFS exposes the disk and every partition in one burst, so the node set
+	# stops growing within a pass or two.  Waiting out all ten attempts cost a
+	# flat ~12 s of black screen on every boot (measured from the kernel log:
+	# "waiting for SCSI/UFS block devices" at 1.195 s, the first "verified
+	# read-only" at 13.341 s), so stop as soon as a pass sees the same number of
+	# nodes as the pass before it.  A boot that never sees a device still burns
+	# all ten attempts, and storage_lock_all below re-marks, re-reads and
+	# re-scans the namespace either way, so nothing is admitted unchecked.
+	if [ "$found_block" = true ] && [ "$seen_this_pass" = "$previous_count" ]; then
+		break
+	fi
+	previous_count=$seen_this_pass
 	sleep 1
 done
 
