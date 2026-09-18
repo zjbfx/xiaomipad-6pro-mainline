@@ -155,7 +155,8 @@ DISTRO_OWNED_PREFIXES = (
     "/sbin/",
     "/lib/",
     "/etc/dconf/",  # preference, apart from the one exact lock below
-    "/etc/gdm3/",
+    "/etc/gdm3/",  # Ubuntu's display manager configuration
+    "/etc/gdm/",  # Fedora's
 )
 
 # The mirror of the rule above: a pinned path must be one this project owns

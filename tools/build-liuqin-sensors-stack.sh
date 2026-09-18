@@ -2,16 +2,51 @@
 # SPDX-License-Identifier: MIT
 #
 # Reproducibly build the liuqin SSC userspace as an arm64 extension layer.
-# The stock Ubuntu 26.04 root is mounted as a read-only overlay lowerdir; apt
-# and compilation can never mutate the release root.  Exact ROM configuration
-# is copied into the output, while per-device registry/calibration is excluded.
+# The distribution root is mounted as a read-only overlay lowerdir; the package
+# manager and compilation can never mutate the release root.  Exact ROM
+# configuration is copied into the output, while per-device
+# registry/calibration is excluded.
+#
+# Ubuntu is the verified default.  LIUQIN_SENSOR_DISTRO=fedora runs the same
+# components through the same overlay and chroot machinery, with dnf in place of
+# apt and /usr/lib64 in place of the Debian multiarch directory.  The three
+# upstream components, their patches, the ROM policy and the audits are
+# distribution-neutral, so only the build environment changes.
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-rootfs=${ROOTFS:-$project_root/tools/local/ubuntu-desktop-26.04-arm64/rootfs}
+distro=${LIUQIN_SENSOR_DISTRO:-ubuntu}
+# Only the Fedora path needs this: it has no libqrtr package, so the runtime the
+# Ubuntu path gets from apt is supplied as a file here.
+qrtr_runtime=${QRTR_RUNTIME:-$project_root/tools/local/qrtr-runtime}
+case $distro in
+ubuntu)
+	default_rootfs=$project_root/tools/local/ubuntu-desktop-26.04-arm64/rootfs
+	sensor_libdir=lib/aarch64-linux-gnu
+	;;
+fedora)
+	default_rootfs=$project_root/out/fedora-rootfs/rootfs
+	sensor_libdir=lib64
+	;;
+*)
+	default_rootfs=
+	sensor_libdir=
+	;;
+esac
+rootfs=${ROOTFS:-$default_rootfs}
 source_manifest=${SOURCE_MANIFEST:-$project_root/device/sensors/sources.manifest}
 source_cache=${SOURCE_CACHE:-$project_root/tools/local/sensor-stack-src}
-rom_sensors=${ROM_SENSORS:-$project_root/tools/local/roms/liuqin/OS2.0.6.0.VMYCNXM/extracted/super-work/vendor-extract/etc/sensors}
+# The registry the pins below describe comes from the stock OS2.0.6.0.VMYCNXM ROM.
+# A checkout that only carries the released 0.2.0 bundle has the identical files
+# under tools/local/roms/liuqin/from-release-0.2.0 (restored from its Ubuntu
+# layer), so fall back to those instead of failing on a path the pins verify
+# either way.
+default_rom_sensors=$project_root/tools/local/roms/liuqin/OS2.0.6.0.VMYCNXM/extracted/super-work/vendor-extract/etc/sensors
+release_rom_sensors=$project_root/tools/local/roms/liuqin/from-release-0.2.0/etc/sensors
+if [ ! -d "$default_rom_sensors/config" ] && [ -d "$release_rom_sensors/config" ]; then
+	default_rom_sensors=$release_rom_sensors
+fi
+rom_sensors=${ROM_SENSORS:-$default_rom_sensors}
 static_overlay=${SENSORS_OVERLAY:-$project_root/device/sensors-overlay}
 ssc_accel_test_runner=$project_root/tests/ssc-accel-integration.py
 hexagonrpc_patch=${HEXAGONRPC_PATCH:-$project_root/device/sensors/patches/0001-hexagonrpcd-expose-the-SSC-registry-version-sibling.patch}
@@ -44,7 +79,8 @@ die() { printf 'build-liuqin-sensors-stack: %s\n' "$*" >&2; exit 1; }
 say() { printf 'build-liuqin-sensors-stack: %s\n' "$*"; }
 
 [ "$(id -u)" = 0 ] || die 'run as root (an overlay mount and arm64 chroot are required)'
-[ -x "$rootfs/usr/lib/systemd/systemd" ] || die "not an Ubuntu root: $rootfs"
+[ -n "$rootfs" ] || die 'LIUQIN_SENSOR_DISTRO must be ubuntu or fedora'
+[ -x "$rootfs/usr/lib/systemd/systemd" ] || die "not a usable root for $distro: $rootfs"
 [ -r "$source_manifest" ] || die "missing source manifest: $source_manifest"
 [ -r "$ssc_accel_test_runner" ] || die "missing SSC accelerometer test runner: $ssc_accel_test_runner"
 [ -r "$hexagonrpc_patch" ] || die "missing hexagonrpc patch: $hexagonrpc_patch"
@@ -114,6 +150,20 @@ while IFS="$(printf '\t')" read -r component version repository commit tree; do
 	git -C "$dir" diff --quiet && git -C "$dir" diff --cached --quiet || die "$component source tree is dirty"
 done <"$source_manifest"
 
+# A run that is killed rather than failed never reaches its cleanup trap, and
+# the mounts it made outlive it.  The next run would stack its own mounts on top
+# and then fail on a busy directory when it rebuilds the source copy, so detach
+# what is left first.  Inner mounts go before the overlay that hosts them.
+stale_root=$out_dir/work/root
+for stale in "$stale_root/build/source" "$stale_root/dev/pts" "$stale_root/proc" \
+	"$stale_root/etc/resolv.conf" "$stale_root/run/systemd/resolve/stub-resolv.conf" \
+	"$stale_root"; do
+	if mountpoint -q "$stale"; then
+		say "detaching a mount an interrupted run left behind: $stale"
+		umount -l "$stale" || die "could not detach $stale"
+	fi
+done
+
 # Avoid a broad deletion target derived from the environment.  RESUME=1 keeps
 # a failed isolated upperdir (never the stock root) so a dependency correction
 # need not download and configure the whole toolchain again.
@@ -162,11 +212,15 @@ mounted_overlay=0
 mounted_source=0
 mounted_proc=0
 mounted_resolv=0
+mounted_etc_resolv=0
 mounted_devpts=0
 cleanup() {
 	set +e
 	if [ "$mounted_resolv" != 0 ] && mountpoint -q "$merged/run/systemd/resolve/stub-resolv.conf"; then
 		umount "$merged/run/systemd/resolve/stub-resolv.conf" || umount -l "$merged/run/systemd/resolve/stub-resolv.conf"
+	fi
+	if [ "$mounted_etc_resolv" != 0 ] && mountpoint -q "$merged/etc/resolv.conf"; then
+		umount "$merged/etc/resolv.conf" || umount -l "$merged/etc/resolv.conf"
 	fi
 	if [ "$mounted_proc" != 0 ] && mountpoint -q "$merged/proc"; then
 		umount "$merged/proc" || umount -l "$merged/proc"
@@ -200,12 +254,50 @@ mount -t proc proc "$merged/proc"
 mounted_proc=1
 mount -t devpts devpts "$merged/dev/pts" -o newinstance,ptmxmode=0666,mode=0620
 mounted_devpts=1
+# The Ubuntu ISO root ships a populated /dev; the Fedora tree ships none of it
+# (dnf --installroot creates no device nodes, and a redirect to /dev/null inside
+# the chroot leaves a regular file of that name behind).  umockdev-run, which
+# wraps the iio tests, allocates a pty and fails with "openpty() failed" when
+# /dev/ptmx is absent.  Fill in only what the tree does not already provide, in
+# the disposable upper; the devpts instance above supplies pts/ptmx and slaves.
+while read -r node kind major minor; do
+	[ -n "$node" ] || continue
+	[ -c "$merged/dev/$node" ] && continue
+	rm -f "$merged/dev/$node"
+	mknod -m 0666 "$merged/dev/$node" "$kind" "$major" "$minor" ||
+		die "could not create /dev/$node"
+done <<'DEVS'
+null c 1 3
+zero c 1 5
+full c 1 7
+random c 1 8
+urandom c 1 9
+tty c 5 0
+DEVS
+[ -e "$merged/dev/ptmx" ] || ln -sfn pts/ptmx "$merged/dev/ptmx"
 : >"$merged/run/systemd/resolve/stub-resolv.conf"
 mount --bind /etc/resolv.conf "$merged/run/systemd/resolve/stub-resolv.conf"
 mounted_resolv=1
+# A Fedora root ships no /etc/resolv.conf: systemd-resolved generates it at
+# boot, and build-liuqin-fedora-rootfs.sh removes any copy so the tablet cannot
+# inherit the build host's resolver.  The stub bind above therefore lands on a
+# file nothing reads, and dnf fails with "Could not resolve hostname".  Bind the
+# host resolver at the path the package manager actually opens.
+# The placeholder below survives a run in the overlay upper, so a resumed build
+# finds an *empty* file where the first run found none.  Existence is therefore
+# the wrong test: what matters is whether the root ends up with a resolver.
+if [ -L "$merged/etc/resolv.conf" ] || [ -s "$merged/etc/resolv.conf" ]; then
+	:
+else
+	[ -e "$merged/etc/resolv.conf" ] || : >"$merged/etc/resolv.conf"
+	mount --bind /etc/resolv.conf "$merged/etc/resolv.conf"
+	mounted_etc_resolv=1
+fi
 
 case $assemble_only in
 0)
+case $distro in
+ubuntu)
 say 'installing isolated Ubuntu 26.04 arm64 build dependencies'
 # appstreamcli's catalogue refresh is a desktop convenience and takes several
 # minutes under QEMU.  Removing its apt hook only in this disposable upperdir
@@ -246,6 +338,40 @@ chroot "$merged" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
 	gir1.2-umockdev-1.0 umockdev locales-all \
 	libglib2.0-dev libqmi-glib-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler \
 	libgudev-1.0-dev libpolkit-gobject-1-dev libsystemd-dev libjson-c-dev
+	;;
+fedora)
+say 'installing isolated Fedora arm64 build dependencies'
+# The Fedora root carries the official repository definitions that
+# build-liuqin-fedora-rootfs.sh installed it from, so dnf resolves the same
+# release here.  No hook surgery is needed: Fedora ships neither the Ubuntu
+# catalogue hooks nor an initramfs trigger for these development packages.
+# cargo/rust are required because hexagonrpc is a Rust daemon built through a
+# Meson wrapper; Ubuntu's desktop root happens to provide them, a Fedora
+# Workstation root does not.
+chroot "$merged" /usr/bin/env dnf -y --setopt=install_weak_deps=False \
+	install gcc gcc-c++ make meson ninja-build pkgconf-pkg-config \
+	python3-devel python3-gobject python3-protobuf python3-dbusmock python3-psutil \
+	libqrtr-glib umockdev umockdev-devel glibc-all-langpacks \
+	glib2-devel libqmi-devel protobuf-c-devel protobuf-c protobuf-compiler \
+	libgudev-devel polkit-devel systemd-devel json-c-devel cargo rust zstd
+
+# Fedora packages no libqrtr.  The library Ubuntu calls libqrtr1 has no
+# counterpart in the Fedora repositories, and libssc's mock server loads it with
+# ctypes from a fixed set of candidate paths (see libssc
+# mocking/ssc_server/ssc-server.in).  The project's own release carries the
+# identical runtime inside its Ubuntu layer, so the same file is installed here
+# and carried into the Fedora layer by the assembly below, exactly as the Ubuntu
+# path does.  QRTR_RUNTIME points at a directory holding libqrtr.so.1 and its
+# target.
+[ -n "$qrtr_runtime" ] ||
+	die 'the Fedora sensor build needs QRTR_RUNTIME pointing at libqrtr.so.1 and its target'
+for qrtr_file in "$qrtr_runtime"/libqrtr.so.1*; do
+	[ -e "$qrtr_file" ] || die "no libqrtr runtime in $qrtr_runtime"
+	cp -a "$qrtr_file" "$merged/usr/$sensor_libdir/" ||
+		die "could not install $(basename "$qrtr_file") into the chroot"
+done
+	;;
+esac
 
 cat >"$merged/build/build.sh" <<'EOF'
 #!/bin/sh
@@ -306,14 +432,23 @@ ldconfig
 
 build_one iio-sensor-proxy -Dssc-support=enabled -Dtests=true -Dgtk-tests=false -Dgtk_doc=false \
 	-Dudevrulesdir=/usr/lib/udev/rules.d -Dsystemdsystemunitdir=/usr/lib/systemd/system
-# All four SSC cases register QRTR service 400.  Run the other 21 tests in
+# All four SSC cases register QRTR service 400.  Run the other tests in
 # parallel, then the SSC cases serially: full coverage without the false race
 # where one mock removes another's service.
+# data/meson.build registers its polkit policy check only when xmllint is
+# present, and Fedora ships xmllint inside libxml2 where the Ubuntu root has no
+# copy at all.  The upstream count is therefore 21 plus that one check, and the
+# expectation is derived from the same condition rather than pinned, so neither
+# distribution can silently lose a test.
 test_list=$(meson test -C /build/work/iio-sensor-proxy --list)
 non_ssc_tests=$(printf '%s\n' "$test_list" | grep -v 'Tests.test_ssc_')
 ssc_tests=$(printf '%s\n' "$test_list" | grep 'Tests.test_ssc_')
-[ "$(printf '%s\n' "$non_ssc_tests" | grep -c .)" = 21 ] || {
-	printf '%s\n' 'unexpected non-SSC iio test count' >&2
+expected_non_ssc=21
+if command -v xmllint >/dev/null 2>&1; then
+	expected_non_ssc=22
+fi
+[ "$(printf '%s\n' "$non_ssc_tests" | grep -c .)" = "$expected_non_ssc" ] || {
+	printf '%s\n' "unexpected non-SSC iio test count (expected $expected_non_ssc)" >&2
 	exit 1
 }
 [ "$(printf '%s\n' "$ssc_tests" | grep -c .)" = 4 ] || {
@@ -328,8 +463,8 @@ ssc_accel_test=$(printf '%s\n' "$ssc_tests" | grep 'Tests.test_ssc_accel$')
 # Test names contain no whitespace in upstream 3.9, so deliberate word
 # splitting passes one name per argument.
 non_ssc_log=/build/work/iio-sensor-proxy/meson-logs/testlog-non-ssc.txt
-if testlog_passed "$non_ssc_log" 21; then
-	printf '%s\n' 'iio-sensor-proxy: retaining current 21/21 non-SSC PASS testlog'
+if testlog_passed "$non_ssc_log" "$expected_non_ssc"; then
+	printf '%s\n' "iio-sensor-proxy: retaining current $expected_non_ssc/$expected_non_ssc non-SSC PASS testlog"
 else
 	# shellcheck disable=SC2086
 	meson test -C /build/work/iio-sensor-proxy --num-processes "$jobs" \
@@ -403,15 +538,32 @@ cleanup_ssc_server
 trap - EXIT HUP INT TERM
 DESTDIR=/build/dest meson install -C /build/work/iio-sensor-proxy
 
-dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' \
-	build-essential meson ninja-build pkg-config libglib2.0-dev libqmi-glib-dev \
-	python3-dev python3-gi python3-protobuf python3-dbusmock libqrtr1 \
-	gir1.2-umockdev-1.0 umockdev locales-all \
-	libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libgudev-1.0-dev \
-	libpolkit-gobject-1-dev libsystemd-dev libjson-c-dev |
-	LC_ALL=C sort >/build/dest/ubuntu-resolute-build-deps.tsv
 EOF
+# The build records the exact development packages it was given.  The command
+# differs per distribution, so it runs here rather than inside the recipe.
+case $distro in
+ubuntu)
+	chroot "$merged" dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' \
+		build-essential meson ninja-build pkg-config libglib2.0-dev libqmi-glib-dev \
+		python3-dev python3-gi python3-protobuf python3-dbusmock libqrtr1 \
+		gir1.2-umockdev-1.0 umockdev locales-all \
+		libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libgudev-1.0-dev \
+		libpolkit-gobject-1-dev libsystemd-dev libjson-c-dev |
+		LC_ALL=C sort >"$merged/build/dest/ubuntu-resolute-build-deps.tsv"
+	;;
+fedora)
+	chroot "$merged" rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' |
+		LC_ALL=C sort >"$merged/build/dest/fedora-build-deps.tsv"
+	;;
+esac
+
 chmod 0755 "$merged/build/build.sh"
+# The upstream projects install into the distribution's library directory: the
+# Debian multiarch path on Ubuntu, /usr/lib64 on Fedora.  The recipe is a quoted
+# heredoc, so the one occurrence is rewritten rather than parameterised.
+sed -i "s|--libdir=lib/aarch64-linux-gnu|--libdir=$sensor_libdir|" "$merged/build/build.sh"
+grep -q -- "--libdir=$sensor_libdir" "$merged/build/build.sh" ||
+	die "could not point the sensor build at $sensor_libdir"
 JOBS=$jobs chroot "$merged" /build/build.sh
 ;;
 1)
@@ -442,13 +594,17 @@ grep -Eq '^test_liuqin_ssc_claim_during_coldplug .* ok$' "$ssc_accel_log" ||
 	die 'Claim-before-coldplug regression is absent from the integration log'
 cp "$ssc_accel_log" "$out_dir/artifacts/iio-ssc-accel-unskipped.log"
 
-# libqrtr is a direct dependency of the upstream libssc test server and is not
-# present in the base root. Carry the complete runtime pair, including
-# the SONAME symlink, rather than letting success depend on the build upperdir.
-mkdir -p "$dest/usr/lib/aarch64-linux-gnu"
-for qrtr_lib in "$merged"/usr/lib/aarch64-linux-gnu/libqrtr.so.1*; do
-	[ -e "$qrtr_lib" ] || die 'Ubuntu libqrtr1 installed no libqrtr.so.1 runtime'
-	cp -a "$qrtr_lib" "$dest/usr/lib/aarch64-linux-gnu/"
+# The upstream libssc test server loads a QRTR runtime with ctypes that the
+# pinned base root does not carry.  Ubuntu's comes from libqrtr1; Fedora ships no
+# equivalent package at all (libqrtr-glib is a different, GObject library), so
+# QRTR_RUNTIME supplies the same file for both.  Carry the pair the same way on
+# each distribution rather than depending on a library that happens to be left
+# behind in the disposable upperdir.
+mkdir -p "$dest/usr/$sensor_libdir"
+for qrtr_lib in "$merged"/usr/$sensor_libdir/libqrtr.so.1*; do
+	[ -e "$qrtr_lib" ] ||
+		die "no libqrtr.so.1 runtime in the build root (distro $distro)"
+	cp -a "$qrtr_lib" "$dest/usr/$sensor_libdir/"
 done
 
 say 'assembling static policy and exact-ROM registry'
@@ -456,15 +612,19 @@ say 'assembling static policy and exact-ROM registry'
 # three upstream templates below the multiarch library directory.  They are
 # neither a valid systemd search path nor the policy used on liuqin; retain the
 # binaries/libraries but remove only that exact generated subtree.
-rm -rf "$dest/usr/lib/aarch64-linux-gnu/systemd"
+rm -rf "$dest/usr/$sensor_libdir/systemd"
 # The upstream install target also emits headers, pkg-config metadata and its
 # Python mock server.  They are build/test inputs, not tablet runtime files.
-rm -rf "$dest/usr/include/libssc" \
-	"$dest/usr/lib/python3/dist-packages/ssc_server" \
-	"$dest/usr/libexec/installed-tests"
-rm -f "$dest/usr/lib/aarch64-linux-gnu/libhexagonrpc.so" \
-	"$dest/usr/lib/aarch64-linux-gnu/libssc.so" \
-	"$dest/usr/lib/aarch64-linux-gnu/pkgconfig/libssc.pc"
+rm -rf "$dest/usr/include/libssc" "$dest/usr/libexec/installed-tests"
+# The Python layout differs: Debian puts it under dist-packages, Fedora under
+# site-packages in a versioned directory.
+case $distro in
+ubuntu) rm -rf "$dest/usr/lib/python3/dist-packages/ssc_server" ;;
+fedora) rm -rf "$dest"/usr/lib/python3.*/site-packages/ssc_server ;;
+esac
+rm -f "$dest/usr/$sensor_libdir/libhexagonrpc.so" \
+	"$dest/usr/$sensor_libdir/libssc.so" \
+	"$dest/usr/$sensor_libdir/pkgconfig/libssc.pc"
 # Ubuntu owns the 3.8 SensorProxy binary/unit/data paths.  Keep those package
 # files intact and install only our verified 3.9+SSC executable under
 # /usr/local; the drop-in above replaces ExecStart without fighting dpkg.
@@ -487,6 +647,9 @@ printf 'version=%s\0' "$version" >"$dest/$device_prefix/sensors/sns_reg_version"
 	"$expected_sns_reg_version_sha256" ] || die 'generated sns_reg_version mismatch'
 cp "$registry_manifest" "$dest/$device_prefix/sensors/config.SHA256SUMS"
 ln -sfn /var/lib/liuqin-sensors/registry "$dest/$device_prefix/sensors/registry"
+# No upstream component installs into the project's own documentation directory,
+# so create it before writing the provenance files that live there.
+mkdir -p "$dest/usr/share/doc/liuqin"
 cp "$source_manifest" "$dest/usr/share/doc/liuqin/sensor-stack-sources.manifest"
 {
 	printf '%s  %s\n' "$expected_hexagonrpc_patch_sha256" "${hexagonrpc_patch##*/}"
@@ -496,8 +659,16 @@ cp "$source_manifest" "$dest/usr/share/doc/liuqin/sensor-stack-sources.manifest"
 	printf '%s  %s\n' "$expected_iio_release_patch_sha256" "${iio_release_patch##*/}"
 	printf '%s  %s\n' "$expected_iio_availability_patch_sha256" "${iio_availability_patch##*/}"
 } >"$dest/usr/share/doc/liuqin/sensor-stack-patches.manifest"
-mv "$dest/ubuntu-resolute-build-deps.tsv" \
-	"$dest/usr/share/doc/liuqin/ubuntu-resolute-sensor-build-deps.tsv"
+case $distro in
+ubuntu)
+	mv "$dest/ubuntu-resolute-build-deps.tsv" \
+		"$dest/usr/share/doc/liuqin/ubuntu-resolute-sensor-build-deps.tsv"
+	;;
+fedora)
+	mv "$dest/fedora-build-deps.tsv" \
+		"$dest/usr/share/doc/liuqin/fedora-sensor-build-deps.tsv"
+	;;
+esac
 
 # Do not enable the target at multi-user.target: it would run before the
 # FastRPC character device exists, become active with a skipped daemon, and
@@ -518,12 +689,18 @@ while :; do
 	[ "$closure_round" -le 12 ] || die 'runtime dependency closure did not converge'
 	missing=$work/runtime-missing.tsv
 	: >"$missing"
+	# file(1) and readelf are gettext-aware.  Under a non-English host locale
+	# readelf labels its output in that language ("共享库：[libssc.so.2]") and the
+	# expression below silently matches nothing, which reads as "nothing is
+	# missing" instead of a failure.  Pin the C locale, as the QEMU smoke check
+	# at the end of this script already does.
 	find "$dest" -type f -print | LC_ALL=C sort | while IFS= read -r elf; do
-		file "$elf" | grep -q 'ELF 64-bit LSB.*ARM aarch64' || continue
-		readelf -d "$elf" 2>/dev/null | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' |
+		LC_ALL=C file "$elf" | grep -q 'ELF 64-bit LSB.*ARM aarch64' || continue
+		LC_ALL=C readelf -d "$elf" 2>/dev/null | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' |
 		while IFS= read -r needed; do
 			[ -n "$needed" ] || continue
-			provider=$(find "$dest/lib" "$dest/usr/lib" "$rootfs/lib" "$rootfs/usr/lib" \
+			provider=$(find "$dest/lib" "$dest/usr/lib" "$dest/usr/$sensor_libdir" \
+				"$rootfs/lib" "$rootfs/usr/lib" "$rootfs/usr/$sensor_libdir" \
 				-name "$needed" -print -quit 2>/dev/null || true)
 			[ -n "$provider" ] || printf '%s\t%s\n' "${elf#$dest/}" "$needed" >>"$missing"
 		done
@@ -531,7 +708,8 @@ while :; do
 	sort -u -o "$missing" "$missing"
 	[ -s "$missing" ] || break
 	while IFS="$(printf '\t')" read -r consumer needed; do
-		source=$(find "$merged/lib" "$merged/usr/lib" -name "$needed" -print -quit 2>/dev/null || true)
+		source=$(find "$merged/lib" "$merged/usr/lib" "$merged/usr/$sensor_libdir" \
+			-name "$needed" -print -quit 2>/dev/null || true)
 		[ -n "$source" ] || die "build root cannot provide $needed required by $consumer"
 		rel=${source#$merged/}
 		target_dir=$dest/${rel%/*}
@@ -549,20 +727,22 @@ done
 say 'auditing architecture, links, and private-data boundary'
 elf_count=0
 find "$dest" -type f -print | LC_ALL=C sort | while IFS= read -r file; do
-	case $(file -b "$file") in
+	case $(LC_ALL=C file -b "$file") in
 	*ELF*)
-		file "$file" | grep -q 'ARM aarch64' || die "non-arm64 ELF in layer: ${file#$dest}"
+		LC_ALL=C file "$file" | grep -q 'ARM aarch64' || die "non-arm64 ELF in layer: ${file#$dest}"
 		;;
 	esac
 done
-elf_count=$(find "$dest" -type f -exec file {} + | grep -c 'ELF 64-bit LSB.*ARM aarch64' || true)
+elf_count=$(LC_ALL=C find "$dest" -type f -exec file {} + | grep -c 'ELF 64-bit LSB.*ARM aarch64' || true)
 [ "$elf_count" -ge 7 ] || die "too few arm64 ELF artifacts: $elf_count"
 [ -x "$dest/usr/bin/ssccli" ] || die 'ssccli was not installed'
 [ -x "$dest/usr/bin/hexagonrpcd" ] || die 'hexagonrpcd was not installed'
 [ -x "$dest/usr/local/libexec/liuqin-iio-sensor-proxy" ] || die 'local iio-sensor-proxy was not installed'
-[ -L "$dest/usr/lib/aarch64-linux-gnu/libqrtr.so.1" ] || die 'libqrtr SONAME symlink is absent'
-qrtr_target=$(readlink "$dest/usr/lib/aarch64-linux-gnu/libqrtr.so.1")
-[ -n "$qrtr_target" ] && [ -s "$dest/usr/lib/aarch64-linux-gnu/$qrtr_target" ] ||
+# Both paths carry the QRTR runtime into the layer; Fedora has no package that
+# provides it, so its copy is the only one a later libssc change could rely on.
+[ -L "$dest/usr/$sensor_libdir/libqrtr.so.1" ] || die 'libqrtr SONAME symlink is absent'
+qrtr_target=$(readlink "$dest/usr/$sensor_libdir/libqrtr.so.1")
+[ -n "$qrtr_target" ] && [ -s "$dest/usr/$sensor_libdir/$qrtr_target" ] ||
 	die 'libqrtr SONAME target is absent'
 [ -L "$dest/$device_prefix/sensors/registry" ] || die 'private registry import link is absent'
 [ "$(readlink "$dest/$device_prefix/sensors/registry")" = /var/lib/liuqin-sensors/registry ] ||
@@ -576,16 +756,17 @@ qrtr_target=$(readlink "$dest/usr/lib/aarch64-linux-gnu/libqrtr.so.1")
 needed_audit=$out_dir/artifacts/runtime-needed.tsv
 : >"$needed_audit"
 find "$dest" -type f -print | LC_ALL=C sort | while IFS= read -r elf; do
-	file "$elf" | grep -q 'ELF 64-bit LSB.*ARM aarch64' || continue
-	readelf -d "$elf" 2>/dev/null | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' |
+	LC_ALL=C file "$elf" | grep -q 'ELF 64-bit LSB.*ARM aarch64' || continue
+	LC_ALL=C readelf -d "$elf" 2>/dev/null | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' |
 	while IFS= read -r needed; do
 		[ -n "$needed" ] || continue
-		provider=$(find -L "$dest/lib" "$dest/usr/lib" "$rootfs/lib" "$rootfs/usr/lib" \
+		provider=$(find -L "$dest/lib" "$dest/usr/lib" "$dest/usr/$sensor_libdir" \
+			"$rootfs/lib" "$rootfs/usr/lib" "$rootfs/usr/$sensor_libdir" \
 			-type f -name "$needed" -print -quit 2>/dev/null || true)
 		[ -n "$provider" ] || die "unclosed runtime dependency ${elf#$dest/}: $needed"
 		case $provider in
 		"$dest"/*) source=extension ;;
-		*) source=ubuntu-root ;;
+		*) source="$distro-root" ;;
 		esac
 		printf '%s\t%s\t%s\n' "${elf#$dest/}" "$needed" "$source" >>"$needed_audit"
 	done
@@ -595,8 +776,16 @@ done
 (cd "$dest" && find . -type f ! -name layer.manifest -printf '%P\0' |
 	LC_ALL=C sort -z | xargs -0 sha256sum) >"$out_dir/artifacts/layer.manifest"
 (cd "$dest" && find . -type l -printf '%P -> %l\n' | LC_ALL=C sort) >"$out_dir/artifacts/links.manifest"
-cp "$dest/usr/share/doc/liuqin/ubuntu-resolute-sensor-build-deps.tsv" \
-	"$out_dir/artifacts/ubuntu-resolute-build-deps.tsv"
+case $distro in
+ubuntu)
+	cp "$dest/usr/share/doc/liuqin/ubuntu-resolute-sensor-build-deps.tsv" \
+		"$out_dir/artifacts/ubuntu-resolute-build-deps.tsv"
+	;;
+fedora)
+	cp "$dest/usr/share/doc/liuqin/fedora-sensor-build-deps.tsv" \
+		"$out_dir/artifacts/fedora-build-deps.tsv"
+	;;
+esac
 
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
 	--pax-option=delete=atime,delete=ctime -C "$dest" -cf "$out_dir/artifacts/sensor-stack.tar" .
@@ -607,7 +796,7 @@ qemu=${QEMU_AARCH64:-/usr/bin/qemu-aarch64-static}
 [ -x "$qemu" ] || die 'qemu-aarch64-static is required for the host smoke gate'
 # The smoke greps English output; a localized host locale (e.g. zh_CN) makes
 # gettext binaries print translated usage text.  Pin the C locale.
-ld_path=$dest/usr/lib/aarch64-linux-gnu:$rootfs/usr/lib/aarch64-linux-gnu:$rootfs/lib/aarch64-linux-gnu
+ld_path=$dest/usr/$sensor_libdir:$rootfs/usr/$sensor_libdir:$rootfs/lib/$sensor_libdir
 version=$(
 	LC_ALL=C LD_LIBRARY_PATH=$ld_path "$qemu" -L "$rootfs" "$dest/usr/bin/ssccli" --version
 )

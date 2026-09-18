@@ -23,18 +23,33 @@ def sha(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def command(address, text, timeout=60):
+# One telnet input line reaches the RAM shell through a terminal whose input
+# buffer is about a kilobyte; measured on the device, 1027 bytes arrive whole
+# and 1067 bytes do not.  Overflow is silent and it drops the tail, so a cut
+# inside a quote leaves that shell waiting for a continuation that never
+# arrives -- the install then hangs with nothing running on the device and no
+# error to read.  Longer commands therefore carry their data in exported
+# variables (which the line has room for) and keep the quoted script short.
+RAM_COMMAND_LIMIT = 960
+
+
+def command(address, text, timeout=60, variables=None):
     """Use exact line markers, not command echo, to delimit one shell result."""
-    token = 'LIUQIN_' + uuid.uuid4().hex
-    start, end = token + '_START', token + '_END'
+    token = 'LIUQIN_' + uuid.uuid4().hex[:12]
+    start, end = token + '_S', token + '_E'
+    exports = ''.join(f'{name}={shlex.quote(value)} ' for name, value in (variables or {}).items())
+    line = ("stty -echo; " + ('export ' + exports + '; ' if exports else '') +
+            "printf '\\n%s\\n' " + shlex.quote(start) +
+            '; sh -c ' + shlex.quote(text) +
+            "; result=$?; printf '\\n%s %s\\n' " + shlex.quote(end) + ' "$result"\n')
+    if len(line) > RAM_COMMAND_LIMIT:
+        raise RuntimeError(f'RAM command is {len(line)} bytes, over the installer shell limit of '
+                           f'{RAM_COMMAND_LIMIT}; it would be truncated and hang silently')
     with socket.create_connection((address, 2323), timeout=10) as connection:
         connection.settimeout(1)
         # BusyBox telnetd announces WILL ECHO / WILL SGA / DO NAWS.
         connection.sendall(b'\xff\xfd\x01\xff\xfd\x03\xff\xfc\x1f')
-        connection.sendall(("stty -echo; printf '\\n%s\\n' " + shlex.quote(start) +
-                            '; sh -c ' + shlex.quote(text) +
-                            "; result=$?; printf '\\n%s %s\\n' " + shlex.quote(end) +
-                            ' "$result"\n').encode())
+        connection.sendall(line.encode())
         buffer = bytearray()
         deadline = time.monotonic() + timeout
         pattern = re.compile(rb'(?:^|\n)' + end.encode() + rb' ([0-9]+)\r?\n')
@@ -143,9 +158,9 @@ def main():
                 if time.monotonic() >= deadline:
                     raise RuntimeError('Installer USB channel did not become ready; no formatting performed')
                 time.sleep(2)
-        def remote(text, timeout=60):
+        def remote(text, timeout=60, variables=None):
             guard = 'test "$(cat /proc/sys/kernel/random/boot_id)" = ' + shlex.quote(boot_id)
-            return command(args.device_address, guard + ' && ' + text, timeout)
+            return command(args.device_address, guard + ' && ' + text, timeout, variables)
 
         cmdline = shlex.split(remote('cat /proc/cmdline').decode())
         serial = next((item.split('=', 1)[1] for item in cmdline if item.startswith('androidboot.serialno=')), '')
@@ -178,13 +193,42 @@ def main():
             backups[target.name] = expected
         (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()))
         url = f'http://{args.host_address}:{server.server_port}/rootfs.tar.gz'
-        install = ['sh', '/usr/lib/liuqin/install-root.sh', boot_id, url,
-                   manifest['files']['rootfs.tar.gz'], str((bundle / 'rootfs.tar.gz').stat().st_size),
-                   'ERASE-LIUQIN-USERDATA']
+        arguments = [boot_id, url, manifest['files']['rootfs.tar.gz'],
+                     str((bundle / 'rootfs.tar.gz').stat().st_size), 'ERASE-LIUQIN-USERDATA']
         if args.enable_rescue:
-            install.append('ENABLE-USB-RESCUE')
-        print('Installing Ubuntu; userdata will be erased after input checks.', flush=True)
-        result = remote(shlex.join(install), 3600)
+            arguments.append('ENABLE-USB-RESCUE')
+        # The installer script and the root contract travel with the bundle
+        # rather than with the RAM image.  A released installer.img embeds both
+        # of its own vintage, so a root from a distribution that image predates
+        # is failed by checks it can no longer satisfy -- the Fedora port is
+        # exactly that case, and the contract is the sharper of the two: it pins
+        # the hashes of files this project builds per distribution.  The device
+        # already fetches the root archive from this server, so it fetches these
+        # two there as well, by digest.  A bundle without them keeps the copies
+        # inside the image.
+        script, contract = bundle / 'install-root.sh', bundle / 'native-root.contract'
+        if script.is_file() and contract.is_file():
+            base = f'http://{args.host_address}:{server.server_port}'
+            # The base URL and the two digests travel as exported variables,
+            # the device-side paths are one letter, and the variables that
+            # hold them are too: every byte of this line is spendable, and
+            # RAM_COMMAND_LIMIT is why.  Both fetches, both checks, the
+            # contract install and the exec stay inside the short script.
+            fetch = ('b=/bin/busybox; mkdir -p /run &&'
+                     ' $b wget -q -O /run/i $B/install-root.sh &&'
+                     ' $b wget -q -O /run/c $B/native-root.contract &&'
+                     ' [ "$($b sha256sum /run/i|$b cut -c1-64)" = "$R" ] &&'
+                     ' [ "$($b sha256sum /run/c|$b cut -c1-64)" = "$C" ] &&'
+                     ' cp /run/c /etc/liuqin-native-root.contract &&'
+                     ' exec sh /run/i "$@"'
+                     ' || { echo "liuqin-install: fetch or verify failed" >&2; exit 1; }')
+            install = ['sh', '-c', fetch, 'liuqin-install', *arguments]
+            variables = {'B': base, 'R': sha(script), 'C': sha(contract)}
+        else:
+            install = ['sh', '/usr/lib/liuqin/install-root.sh', *arguments]
+            variables = None
+        print('Installing the system; userdata will be erased after input checks.', flush=True)
+        result = remote(shlex.join(install), 3600, variables)
         if b'liuqin-install: ROOT_INSTALLED' not in result:
             raise RuntimeError('Device did not confirm root installation')
         remote("(sleep 2; /usr/sbin/liuqin-reboot bootloader) >/dev/null 2>&1 &")

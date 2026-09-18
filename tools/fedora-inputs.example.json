@@ -1,0 +1,17 @@
+{
+  "_comment": "Template for --inputs when assembling a Fedora image. Paths may be relative and are resolved against this file's directory. SENSOR_STACK_SHA256 is a digest, not a path. POWER_SETTINGS_BINARY may be omitted: the assembly then installs no power panel, and the result is a working tablet whose Power panel lacks the project's button-policy controls. See docs/FEDORA.zh-CN.md.",
+  "_firmware": "FIRMWARE_POOL is the raw vendor pool the first-boot initramfs reads; FIRMWARE_TREE is the prepared tree build-liuqin-firmware-prep.sh emits. The root assembler installs the /usr/lib/firmware closure from the latter.",
+  "FEDORA_ROOTFS_ROOT": "../out/fedora-rootfs/rootfs",
+  "FEDORA_ROOTFS_MANIFEST": "../out/fedora-rootfs/rootfs.manifest",
+  "FIRMWARE_POOL": "../out/from-release-firmware/pool",
+  "FIRMWARE_TREE": "../out/firmware-tree",
+  "AUDIO_TOPOLOGY": "../out/from-release-firmware/topology/Xiaomi-Pad-6-Pro-tplg.bin",
+  "WLAN_HSP2_TUPLE": "../out/from-release-firmware/hsp2-tuple",
+  "STOCK_OVERLAY_DIR": "../out/stock-dtb-sets/dtbo",
+  "STOCK_BASE_DIR": "../out/stock-dtb-sets/vendor_boot-dtbs",
+  "SENSOR_STACK_TAR": "../out/liuqin-sensors-stack-fedora/artifacts/sensor-stack.tar",
+  "SENSOR_STACK_SHA256": "REPLACE_WITH_sha256sum_OF_SENSOR_STACK_TAR",
+  "POWER_SETTINGS_BINARY": "../out/gnome-control-center/gnome-control-center",
+  "MKBOOTIMG_DIR": "local/aosp-mkbootimg",
+  "INSTALLER_IMG": "/path/to/liuqin-v0.2.0/installer.img"
+}

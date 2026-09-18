@@ -279,6 +279,9 @@ storage_gnome_root_ok() {
 	# that the unit is enabled.  These topology/mode gates are deliberately
 	# outside the regular-file contract because symlinks have no stable file
 	# payload to hash.
+	# The gnome profile is the Ubuntu-shaped chain and stays Ubuntu-only; a
+	# Fedora root is admitted through the native profile below, which accepts
+	# either display manager.
 	for storage_gnome_executable in \
 		/usr/lib/systemd/systemd /usr/sbin/gdm3 /usr/bin/gnome-shell \
 		/usr/bin/hexagonrpcd /usr/bin/ssccli \
@@ -405,7 +408,7 @@ storage_native_root_ok() {
 	done <"$storage_native_contract"
 	[ "$storage_native_lines" -ge 10 ] && [ "$storage_native_lines" -le 128 ] || return 1
 	for storage_native_executable in \
-		/usr/lib/systemd/systemd /usr/sbin/gdm3 /usr/bin/gnome-shell \
+		/usr/lib/systemd/systemd /usr/bin/gnome-shell \
 		/usr/bin/hexagonrpcd \
 		/usr/local/bin/busybox /usr/local/bin/liuqin-shell \
 		/usr/libexec/iio-sensor-proxy \
@@ -419,6 +422,18 @@ storage_native_root_ok() {
 		[ "$("$BB" stat -c '%a' "$storage_checked_root$storage_native_executable" 2>/dev/null || true)" = 755 ] ||
 			storage_native_reject "not executable: $storage_native_executable" || return 1
 	done
+	# The display manager is the one admission path whose name is distribution
+	# specific: Ubuntu ships /usr/sbin/gdm3, Fedora /usr/sbin/gdm.  Either is
+	# accepted, so one initramfs admits both roots and the verified Ubuntu path
+	# keeps its exact meaning.
+	storage_native_dm_ok=false
+	for storage_native_dm in /usr/sbin/gdm3 /usr/sbin/gdm; do
+		if [ "$("$BB" stat -c '%a' "$storage_checked_root$storage_native_dm" 2>/dev/null || true)" = 755 ]; then
+			storage_native_dm_ok=true
+		fi
+	done
+	[ "$storage_native_dm_ok" = true ] ||
+		storage_native_reject "no display manager executable (gdm3 or gdm)" || return 1
 	for storage_native_regular in \
 		/etc/dconf/db/local.d/locks/00-liuqin-power \
 		/etc/systemd/system/liuqin-gnome-storage-guard.service \
@@ -477,7 +492,10 @@ storage_native_root_ok() {
 	[ "$("$BB" readlink "$storage_checked_root/etc/systemd/system/default.target")" = /usr/lib/systemd/system/graphical.target ] || return 1
 	[ -L "$storage_checked_root/etc/systemd/system/display-manager.service" ] ||
 		storage_native_reject "display-manager.service is not a symlink" || return 1
-	[ "$("$BB" readlink "$storage_checked_root/etc/systemd/system/display-manager.service")" = /lib/systemd/system/gdm3.service ] || return 1
+	case $("$BB" readlink "$storage_checked_root/etc/systemd/system/display-manager.service") in
+	/lib/systemd/system/gdm3.service | /usr/lib/systemd/system/gdm.service) ;;
+	*) return 1 ;;
+	esac
 	"$BB" chroot "$storage_checked_root" /usr/lib/systemd/systemd --version >/dev/null 2>&1 ||
 		storage_native_reject "systemd will not execute under chroot" || return 1
 	return 0

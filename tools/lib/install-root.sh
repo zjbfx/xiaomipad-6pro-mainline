@@ -99,8 +99,13 @@ PERSIST_SRC=/run/persist sh /usr/lib/liuqin/provision.sh /mnt/install/native-roo
 if [ "$rescue" = ENABLE-USB-RESCUE ]; then
 	touch /mnt/install/native-root/etc/liuqin-rescue-enabled
 fi
-[ -n "$(/usr/sbin/getcap /mnt/install/native-root/usr/lib/snapd/snap-confine)" ] ||
-	die 'snap-confine capability was not restored'
+# The snap-confine capability travels through security.capability xattrs, so its
+# survival proves the extraction preserved them.  A root without snapd (Fedora)
+# has nothing to prove here and is not failed for the absence.
+if [ -e /mnt/install/native-root/usr/lib/snapd/snap-confine ]; then
+	[ -n "$(/usr/sbin/getcap /mnt/install/native-root/usr/lib/snapd/snap-confine)" ] ||
+		die 'snap-confine capability was not restored'
+fi
 # Verify immutable boot-contract files after extraction and provisioning.
 tail -n +2 /etc/liuqin-native-root.contract | while read -r expected path; do
 	[ -n "$expected" ] || continue
