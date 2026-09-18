@@ -158,6 +158,36 @@ stage_configure() {
 	fi
 	ln -sfn /usr/lib/systemd/system/graphical.target "$root/etc/systemd/system/default.target"
 
+	# Three Workstation units this product has no use for.  Masks, not disables:
+	# a mask is a file, so it is part of the tree the admission contract hashes,
+	# and it fails a Wants= immediately instead of leaving a start job to time
+	# out.  Measured on the tablet 2026-09-18, and note what the numbers mean --
+	# systemd-analyze blame reports a unit's own activation time, which is not
+	# the same as boot delay, so only the first of these is claimed as a gain.
+	#
+	# plymouth-quit-wait: it is WantedBy=multi-user.target and Before=getty@tty1,
+	# so it sits on the path to graphical.target, waiting for a boot splash this
+	# product never draws -- device/native-bootargs.txt has neither rhgb nor
+	# splash, so plymouthd has nothing to hand over.  ~10 s of wait.
+	#
+	# fwupd: firmware on this tablet arrives by flashing from fastboot; there is
+	# no UEFI capsule for the daemon to speak to.  3.4 s of its own runtime.
+	#
+	# NetworkManager-wait-online: it only delays network-online.target, and on
+	# this root that target is wanted by dnf-makecache.timer, iscsi.service, the
+	# three nfs-* units and wg-quick@wg0 -- none of them configured.  2.5 s.  Safe
+	# here; it would not be on a root that mounts network filesystems.
+	#
+	# The fourth boot-time unit, the zram swap that timed out for ~27 s, is not
+	# distro policy: it follows from the locked kernel having no CONFIG_ZRAM, so
+	# it is switched off in the shared device layer instead
+	# (device/gnome-overlay/etc/systemd/zram-generator.conf).
+	for unit in plymouth-quit-wait.service fwupd.service NetworkManager-wait-online.service; do
+		[ -e "$root/usr/lib/systemd/system/$unit" ] ||
+			die "$unit is not in the package set any more; revisit the masks"
+		ln -sfn /dev/null "$root/etc/systemd/system/$unit"
+	done
+
 	# The sensor stack's provisioning resolves this account in the target root
 	# (tools/provision-liuqin-from-persist.sh); Fedora has no such user and the
 	# tree would fail provisioning without it.  Pick stable ids so the registry
@@ -239,6 +269,11 @@ stage_preflight() {
 	[ -L "$root/etc/systemd/system/display-manager.service" ] &&
 		[ "$(readlink "$root/etc/systemd/system/display-manager.service")" = /usr/lib/systemd/system/gdm.service ] ||
 		die 'display-manager.service does not point at gdm.service'
+	for unit in plymouth-quit-wait.service fwupd.service NetworkManager-wait-online.service; do
+		[ -L "$root/etc/systemd/system/$unit" ] &&
+			[ "$(readlink "$root/etc/systemd/system/$unit")" = /dev/null ] ||
+			die "$unit is not masked; the stage_configure masks did not survive"
+	done
 	grep -q '^fastrpc:' "$root/etc/passwd" || die 'the fastrpc account is missing'
 	# Both files are weak dependencies that install_weak_deps=False drops, and
 	# neither absence is visible until first boot: dbus-daemon is what GDM execs
