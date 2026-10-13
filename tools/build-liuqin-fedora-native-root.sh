@@ -257,8 +257,19 @@ stage_device() {
 	liuqin_theme=$root/usr/share/plymouth/themes/liuqin
 	spinner_theme=$root/usr/share/plymouth/themes/spinner
 	if [ -d "$spinner_theme" ]; then
-		for asset in throbber-*.png bullet.png capslock.png entry.png \
-			keyboard.png keymap-render.png lock.png; do
+		# The glob has to carry the directory it is meant to expand in.  An
+		# unqualified `throbber-*.png` expands against the shell's working
+		# directory -- the repository root -- matches nothing there, and then
+		# reaches the `[ -f ]` guard as the literal pattern, which fails it: the
+		# loop copies the six plain filenames beside it and not one animation
+		# frame, so the theme boots without a spinner and preflight reports the
+		# missing asset rather than a missing copy.
+		for asset in "$spinner_theme"/throbber-*.png; do
+			[ -f "$asset" ] || continue
+			cp -f "$asset" "$liuqin_theme/"
+		done
+		for asset in bullet.png capslock.png entry.png keyboard.png \
+			keymap-render.png lock.png; do
 			[ -f "$spinner_theme/$asset" ] || continue
 			cp -f "$spinner_theme/$asset" "$liuqin_theme/"
 		done
@@ -293,12 +304,18 @@ stage_device() {
 	# into a rescue shell rather than a desktop.  Same rewrite, and the same
 	# drift checks, as the device-layer package builder.
 	guard=$root/usr/local/sbin/liuqin-gnome-storage-guard
-	grep -qx 'marker=/etc/liuqin-gnome-root' "$guard" ||
+	grep -qx 'marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}' "$guard" ||
 		die 'storage guard drifted from the reviewed legacy marker'
 	grep -qx 'marker_sha=bd86a359f5b6bf05f09abf544967489e924c251ab7c07684df62b0dbda4c3fca' "$guard" ||
 		die 'storage guard drifted from the reviewed legacy marker hash'
+	# The marker line gained a test hook upstream, and the replacement takes the
+	# whole line with it -- the same rewrite, character for character, as
+	# build-liuqin-debs.sh, so both distros install an identical guard.  The
+	# source file keeps the hook, which is what tests/storage-guard.sh drives it
+	# through; the installed one does not, and the shell never sees either: the
+	# expression is single-quoted, and `$` mid-pattern is literal in a BRE.
 	sed -i \
-		-e 's|^marker=/etc/liuqin-gnome-root$|marker=/etc/liuqin-native-root|' \
+		-e 's|^marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}$|marker=/etc/liuqin-native-root|' \
 		-e 's|^marker_sha=bd86a359f5b6bf05f09abf544967489e924c251ab7c07684df62b0dbda4c3fca$|marker_sha=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b|' \
 		"$guard"
 	grep -qx 'marker=/etc/liuqin-native-root' "$guard" ||
@@ -414,8 +431,36 @@ stage_device() {
 	done
 
 	# The device layer is copied from build-host trees that belong to the
-	# developer; nothing in the installed root may carry that ownership.
-	chown -R 0:0 "$root/usr" "$root/etc"
+	# developer; nothing in the installed root may carry that ownership.  Two
+	# things decide how that is done, and both are traps a `chown -R 0:0 usr
+	# etc` walks straight into.
+	#
+	# The first is that chown(2) sets ATTR_KILL_SUID and ATTR_KILL_SGID on every
+	# regular file it is called on, whether or not the ownership changes: a
+	# blanket chown over the tree strips sudo, passwd, su, pkexec and mount on
+	# its way past them.  Nothing looks wrong until preflight counts the
+	# privileged files ("the tree carries 1, the source had 26"), and on the
+	# tablet it reads as "effective uid is not 0" from a shell that looks like
+	# an account problem.  Directories are exempt from that clearing, so the
+	# setgid /var/lib/lockdown survives either way and is no evidence the bits
+	# are intact.
+	#
+	# The second is the group.  Only the developer's uid is wrong -- the
+	# distribution's own files are root-owned already, and 26 of them carry a
+	# group on purpose: dbus-daemon-launch-helper is root:dbus 4750, plocate is
+	# root:gnome-remote-desktop 2755, lockdev is root:lock 2711.  Their setgid
+	# bit is what grants that group, so chowning them to root:root both breaks
+	# the grant and clears the bit.  Select on uid alone and leave the group of
+	# anything root already owns alone.
+	#
+	# -h because a plain chown dereferences: the four Ubuntu unit masks and the
+	# four ath11k firmware links arrive as symlinks out of developer-owned
+	# trees, and chowning their targets leaves the links, and the tar entries
+	# made from them, owned by the developer.
+	find "$root/usr" "$root/etc" ! -uid 0 -print0 | xargs -0 -r chown -h 0:0
+	if find "$root/usr" "$root/etc" ! -uid 0 -print -quit 2>/dev/null | grep -q .; then
+		die 'the device layer left files that are not root-owned'
+	fi
 	say 'device PASS'
 }
 

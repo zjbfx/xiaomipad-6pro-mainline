@@ -155,9 +155,14 @@ stage_workstation() {
 	# top because it carries what the device layer and the admission gate need,
 	# and those must not depend on a group definition that moves between
 	# releases.  The kernel exclude above still applies to group members.
-	# Two invocations on purpose: `group install` is how dnf5 resolves an
-	# environment id, and the package list stays a separate, explicit step.
-	dnf_install_root group install '@workstation-product-environment'
+	# Two invocations on purpose: the environment and the explicit package list
+	# stay separate steps.  `install` rather than `group install` because the
+	# environment is named with its `@` prefix: on dnf5 the `@` makes `group
+	# install` look the id up among groups only, and it fails with "No match for
+	# argument: @workstation-product-environment" even though the environment is
+	# right there in the comps metadata.  Plain `install` resolves environments
+	# natively (and still resolves `@`-prefixed groups such as @core above).
+	dnf_install_root install '@workstation-product-environment'
 	# shellcheck disable=SC2086
 	dnf_install_root install $desktop_packages
 	# Stage 1 admits the root only if its systemd really is a systemd.
