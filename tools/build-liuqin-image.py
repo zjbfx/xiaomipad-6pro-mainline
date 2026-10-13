@@ -278,8 +278,15 @@ def main():
                      'NOTICE': project / 'NOTICE', 'LICENSE': project / 'LICENSE',
                      ksu_modules[0].name: ksu_modules[0], 'dualboot-tools.zip': dualboot_tools,
                      'FINGERPRINT.md': project / 'docs/FINGERPRINT.md',
-                     'FINGERPRINT.zh-CN.md': project / 'docs/FINGERPRINT.zh-CN.md',
-                     'fingerprint-build-inputs.tar.gz': Path(supplied['FINGERPRINT_BUNDLE'])}
+                     'FINGERPRINT.zh-CN.md': project / 'docs/FINGERPRINT.zh-CN.md'}
+            if 'FINGERPRINT_BUNDLE' in supplied:
+                # Native fingerprint support ships as its own bundle and is a
+                # required input on the Ubuntu path.  A distribution that does
+                # not carry the layer yet -- the Fedora port is one, until its
+                # libfprint-tod situation is settled -- supplies no such key,
+                # and the bundle has to assemble without it rather than fail on
+                # a missing entry the metadata already records as absent.
+                files['fingerprint-build-inputs.tar.gz'] = Path(supplied['FINGERPRINT_BUNDLE'])
             if args.distro == 'fedora':
                 # The released installer.img carries an install-root.sh and a
                 # root contract of its own vintage, and the contract is the
