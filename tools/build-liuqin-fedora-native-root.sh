@@ -48,6 +48,13 @@ audio_topology=${AUDIO_TOPOLOGY:?"set AUDIO_TOPOLOGY to the built AudioReach top
 sensor_stack_tar=${SENSOR_STACK_TAR:?"set SENSOR_STACK_TAR to the built sensor stack archive"}
 power_settings_binary=${POWER_SETTINGS_BINARY:-}
 power_key_cc=${POWER_KEY_CC:-${CROSS_COMPILE:-aarch64-linux-gnu-}gcc}
+# The three device helpers are the project's own C, compiled here exactly as the
+# Ubuntu path's package builder compiles them.  None of them includes a
+# distribution header: the audio probe declares the libasound symbols it calls,
+# so the shared object is named on the link line instead of a -dev package.
+power_keyd_source=${POWER_KEYD_SOURCE:-"$project_root/device/power-key/liuqin-power-keyd.c"}
+uinput_automation_source=${UINPUT_AUTOMATION_SOURCE:-"$project_root/device/input/liuqin-uinput-automation.c"}
+audio_probe_source=${AUDIO_PROBE_SOURCE:-"$project_root/device/audio-topology/liuqin-audio-hwparams-probe.c"}
 marker_sha256=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b
 
 # Fedora's cross compiler is configured without a default sysroot: its own
@@ -331,11 +338,9 @@ stage_device() {
 	[ -x "$root/usr/local/bin/busybox" ] ||
 		die '/usr/local/bin/busybox is missing; run the configure stage of the rootfs builder'
 
-	# The power key daemon comes from the project's own C source, compiled with
-	# the deterministic flags the device-layer package builder uses so the
+	# The device helpers come from the project's own C source, compiled with the
+	# deterministic flags the device-layer package builder uses so the
 	# contract's pin describes a build anyone can repeat.
-	source_file=$project_root/device/power-key/liuqin-power-keyd.c
-	[ -f "$source_file" ] || die "power key source missing: $source_file"
 	command -v "$power_key_cc" >/dev/null || die "cross compiler is unavailable: $power_key_cc"
 	mkdir -p "$root/usr/local/libexec"
 	# shellcheck disable=SC2086 # the two flags are empty when unavailable
@@ -348,12 +353,43 @@ stage_device() {
 		-ffile-prefix-map="$project_root"=. \
 		-ffile-prefix-map="$root"=/build/liuqin-device-support \
 		-Wl,-z,relro,-z,now -Wl,--build-id=sha1 \
-		"$source_file" -o "$root/usr/local/libexec/liuqin-power-keyd"
+		"$power_keyd_source" -o "$root/usr/local/libexec/liuqin-power-keyd"
 	chmod 0755 "$root/usr/local/libexec/liuqin-power-keyd"
+	# The input automation is a test helper a developer runs by hand, so it is
+	# static: it has to work on a tablet whose userspace may be mid-reinstall.
+	# shellcheck disable=SC2086
+	LC_ALL=C SOURCE_DATE_EPOCH=0 "$power_key_cc" \
+		$cross_sysroot_flag $atomic_flag \
+		-std=c11 -O2 -pipe -static -Wall -Wextra -Werror -Wformat=2 \
+		-fstack-protector-strong -D_FORTIFY_SOURCE=3 \
+		-ffile-prefix-map="$project_root"=. \
+		-ffile-prefix-map="$root"=/build/liuqin-device-support \
+		-Wl,-z,relro,-z,now -Wl,--build-id=sha1 \
+		"$uinput_automation_source" -o "$root/usr/local/libexec/liuqin-uinput-automation"
+	chmod 0755 "$root/usr/local/libexec/liuqin-uinput-automation"
+	# Fedora keeps its 64-bit libraries in /usr/lib64, so the shared object the
+	# probe links against is named where this root carries it.  The probe calls
+	# a handful of snd_pcm_* entry points and needs no headers, which is why no
+	# alsa-lib-devel is involved.
+	audio_probe_libasound=$root/usr/lib64/libasound.so.2.0.0
+	[ -f "$audio_probe_libasound" ] ||
+		die "libasound is missing from the Fedora tree: $audio_probe_libasound"
+	# shellcheck disable=SC2086
+	LC_ALL=C SOURCE_DATE_EPOCH=0 "$power_key_cc" \
+		$cross_sysroot_flag $atomic_flag \
+		-std=c11 -O2 -pipe -Wall -Wextra -Werror -fstack-protector-strong \
+		-D_FORTIFY_SOURCE=3 -ffile-prefix-map="$project_root"=. \
+		-Wl,-z,relro,-z,now -Wl,--build-id=sha1 \
+		"$audio_probe_source" "$audio_probe_libasound" \
+		-o "$root/usr/local/libexec/liuqin-audio-hwparams-probe"
+	chmod 0755 "$root/usr/local/libexec/liuqin-audio-hwparams-probe"
 	command -v readelf >/dev/null || die 'readelf is required to verify generated executables'
-	[ "$(LC_ALL=C readelf -h "$root/usr/local/libexec/liuqin-power-keyd" |
-		sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = AArch64 ] ||
-		die 'power-key daemon is not an AArch64 executable'
+	for helper in liuqin-power-keyd liuqin-uinput-automation liuqin-audio-hwparams-probe; do
+		[ -x "$root/usr/local/libexec/$helper" ] || die "helper was not built: $helper"
+		[ "$(LC_ALL=C readelf -h "$root/usr/local/libexec/$helper" |
+			sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = AArch64 ] ||
+			die "device helper is not an AArch64 executable: $helper"
+	done
 
 	# The device layer is copied from build-host trees that belong to the
 	# developer; nothing in the installed root may carry that ownership.
@@ -373,6 +409,10 @@ stage_assemble() {
 	}
 	link_unit basic.target.requires liuqin-gnome-storage-guard.service
 	link_unit multi-user.target.wants liuqin-gnome-usb-rescue.service
+	# liuqin-slpi.service arrives inside the sensor stack archive rather than the
+	# gnome overlay, so the link is what makes the SLPI boot path part of the
+	# installed topology instead of something only a udev rule can reach.
+	link_unit multi-user.target.wants liuqin-slpi.service
 	link_unit multi-user.target.wants liuqin-power-keyd.service
 	link_unit graphical.target.wants liuqin-backlight-default.service
 	# sysinit, not the graphical targets: the probe only has to beat
