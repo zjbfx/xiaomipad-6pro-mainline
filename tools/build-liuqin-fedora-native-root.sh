@@ -15,13 +15,14 @@
 #
 # Stages are individually rerunnable:
 #
-#   sh tools/build-liuqin-fedora-native-root.sh copy       # Fedora tree + system edits
-#   sh tools/build-liuqin-fedora-native-root.sh device     # device layer payload
-#   sh tools/build-liuqin-fedora-native-root.sh assemble   # unit links, marker, gates
-#   sh tools/build-liuqin-fedora-native-root.sh preflight  # mirror of stage-1 admission
-#   sh tools/build-liuqin-fedora-native-root.sh manifest   # tree manifest + hash list
-#   sh tools/build-liuqin-fedora-native-root.sh pack       # rootfs.tar.gz
-#   sh tools/build-liuqin-fedora-native-root.sh all        # copy..manifest
+#   sh tools/build-liuqin-fedora-native-root.sh copy        # Fedora tree + system edits
+#   sh tools/build-liuqin-fedora-native-root.sh device      # device layer payload
+#   sh tools/build-liuqin-fedora-native-root.sh fingerprint # fingerprint layer payload
+#   sh tools/build-liuqin-fedora-native-root.sh assemble    # unit links, marker, gates
+#   sh tools/build-liuqin-fedora-native-root.sh preflight   # mirror of stage-1 admission
+#   sh tools/build-liuqin-fedora-native-root.sh manifest    # tree manifest + hash list
+#   sh tools/build-liuqin-fedora-native-root.sh pack        # rootfs.tar.gz
+#   sh tools/build-liuqin-fedora-native-root.sh all         # copy..manifest
 #
 # Inputs, all required for `device`:
 #   FEDORA_ROOTFS_ROOT        the tree produced by build-liuqin-fedora-rootfs.sh
@@ -37,6 +38,17 @@
 # looks at, so its absence is a warning rather than a reason to refuse.  What the
 # script does refuse is assembling without the kernel, because a root without its
 # modules boots into a screen that never lights up.
+#
+# And for `fingerprint`, which also needs `device` to have run first:
+#   FINGERPRINT_BUNDLE        the public fingerprint-build-inputs.tar.gz from the
+#                             project's own release -- not a build product of
+#                             this repository, and the same file the Ubuntu path
+#                             installs as a package
+#   LIBFPRINT_TOD_TAR         libfprint-tod.tar.gz from
+#                             build-liuqin-fedora-libfprint-tod.sh
+#   LIUQIN_FINGERPRINT_VERSION  release version the candidate metadata records
+#                             (default 0.6.0); provenance only, nothing reads it
+#                             back at runtime
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -46,6 +58,16 @@ kernel_layer=${KERNEL_LAYER_ROOT:?"set KERNEL_LAYER_ROOT to the released kernel 
 firmware_pool=${FIRMWARE_POOL:?"set FIRMWARE_POOL to the prepared firmware directory"}
 audio_topology=${AUDIO_TOPOLOGY:?"set AUDIO_TOPOLOGY to the built AudioReach topology"}
 sensor_stack_tar=${SENSOR_STACK_TAR:?"set SENSOR_STACK_TAR to the built sensor stack archive"}
+# The fingerprint layer's two inputs are required alongside the four above, for
+# the same reason: the layer is installed after the kernel record it is checked
+# against, and a caller who does not want it should not run the stage rather
+# than leave it half-wired.  There is no `-` default here, unlike the power
+# panel, because neither file is a build product of this repository -- both are
+# release artifacts, and one that is missing is a missing download, not a
+# deliberate omission.
+fingerprint_bundle=${FINGERPRINT_BUNDLE:?"set FINGERPRINT_BUNDLE to the released fingerprint-build-inputs.tar.gz"}
+libfprint_tod_tar=${LIBFPRINT_TOD_TAR:?"set LIBFPRINT_TOD_TAR to the built libfprint TOD archive"}
+fingerprint_version=${LIUQIN_FINGERPRINT_VERSION:-0.6.0}
 power_settings_binary=${POWER_SETTINGS_BINARY:-}
 power_key_cc=${POWER_KEY_CC:-${CROSS_COMPILE:-aarch64-linux-gnu-}gcc}
 # The three device helpers are the project's own C, compiled here exactly as the
@@ -397,6 +419,57 @@ stage_device() {
 	say 'device PASS'
 }
 
+# The fingerprint layer.  It is a device-layer payload like the ones above, and
+# it is a separate stage because it has to run after them: the module inside the
+# bundle is vermagic-pinned to one kernel release, and the release it is checked
+# against is the record `device` writes.  Running it before that record exists
+# would make the check skippable by ordering rather than by intent.
+stage_fingerprint() {
+	[ -x "$root/usr/lib/systemd/systemd" ] || die "run the copy stage first: $root"
+	[ -f "$root/usr/share/liuqin/kernel.release" ] ||
+		die 'run the device stage first: the root records no kernel release to check against'
+	[ -f "$fingerprint_bundle" ] || die "fingerprint bundle missing: $fingerprint_bundle"
+	[ -f "$libfprint_tod_tar" ] || die "libfprint TOD archive missing: $libfprint_tod_tar"
+	say 'staging the fingerprint layer'
+
+	# The helper is the deb builder's own verification and staging code called
+	# without the dpkg wrapper, so the two distributions get the same checks
+	# rather than two implementations that agree today.  The kernel record is
+	# handed over so an image built from the wrong kernel commit is refused here,
+	# by name, instead of installing cleanly and failing at the first login.
+	PYTHONDONTWRITEBYTECODE=1 python3 "$project_root/tools/lib/stage-fingerprint-root.py" \
+		--bundle "$fingerprint_bundle" \
+		--tod-tar "$libfprint_tod_tar" \
+		--root "$root" \
+		--version "$fingerprint_version" \
+		--kernel-release-file "$root/usr/share/liuqin/kernel.release" ||
+		die 'could not stage the fingerprint layer'
+
+	# Same reason as the device stage, one directory down: the payload is copied
+	# from a temporary directory the developer's account owns.  Only the paths
+	# this stage writes are named -- re-chowning all of $root/usr would walk the
+	# Fedora tree for nothing.  lib64 rather than a discovered name because this
+	# root is Fedora's.
+	chown -R 0:0 "$root/usr/local/lib/liuqin-fpc-oem"
+	for library in libfprint-2.so.2.0.0 libfprint-2.so.2 libfprint-2-tod.so.1; do
+		[ -f "$root/usr/lib64/$library" ] || die "the TOD build did not install $library"
+		chown 0:0 "$root/usr/lib64/$library"
+	done
+	for installed in usr/lib/systemd/system/liuqin-fpc-stable-module.service \
+		etc/systemd/system/fprintd.service.d/60-liuqin-fpc-oem.conf \
+		etc/modprobe.d/liuqin-fpc-late-load.conf \
+		etc/polkit-1/rules.d/60-liuqin-fingerprint-enroll.rules; do
+		[ -f "$root/$installed" ] || die "the fingerprint layer did not install $installed"
+		chown 0:0 "$root/$installed"
+	done
+	enable=etc/systemd/system/multi-user.target.wants/liuqin-fpc-stable-module.service
+	[ -L "$root/$enable" ] || die 'the fingerprint layer did not enable its module unit'
+	# -h on the link itself: a plain chown would follow it and leave the link
+	# owned by the developer, which is what tar would then record.
+	chown -h 0:0 "$root/$enable"
+	say 'fingerprint PASS'
+}
+
 # Symlinks and modes Stage 1 asserts.  Failing here costs seconds; failing on the
 # tablet costs a boot loop and a rescue shell.
 stage_assemble() {
@@ -649,6 +722,7 @@ stage_pack() {
 case ${1:-all} in
 copy) stage_copy ;;
 device) stage_device ;;
+fingerprint) stage_fingerprint ;;
 assemble) stage_assemble ;;
 preflight) stage_preflight ;;
 manifest) stage_manifest ;;
@@ -656,12 +730,13 @@ pack) stage_pack ;;
 all)
 	stage_copy
 	stage_device
+	stage_fingerprint
 	stage_assemble
 	stage_preflight
 	stage_manifest
 	;;
 *)
-	printf 'usage: %s [copy|device|assemble|preflight|manifest|pack|all]\n' "$0" >&2
+	printf 'usage: %s [copy|device|fingerprint|assemble|preflight|manifest|pack|all]\n' "$0" >&2
 	exit 2
 	;;
 esac

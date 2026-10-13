@@ -1,5 +1,6 @@
 {
   "_comment": "Template for --inputs when assembling a Fedora image. Paths may be relative and are resolved against this file's directory. SENSOR_STACK_SHA256 is a digest, not a path. POWER_SETTINGS_BINARY may be omitted: the assembly then installs no power panel, and the result is a working tablet whose Power panel lacks the project's button-policy controls. See docs/FEDORA.zh-CN.md.",
+  "_fingerprint": "FINGERPRINT_BUNDLE is the public fingerprint-build-inputs.tar.gz from the project's own release, the same file the Ubuntu path uses; it is not a Fedora build product. LIBFPRINT_TOD_TAR is the archive build-liuqin-fedora-libfprint-tod.sh writes, required here because Fedora publishes no libfprint-2-tod package at all. Neither is optional, and neither has a digest: the first pins its own contents, and the second is verified as it is built.",
   "_firmware": "FIRMWARE_POOL is the raw vendor pool the first-boot initramfs reads; FIRMWARE_TREE is the prepared tree build-liuqin-firmware-prep.sh emits. The root assembler installs the /usr/lib/firmware closure from the latter.",
   "FEDORA_ROOTFS_ROOT": "../out/fedora-rootfs/rootfs",
   "FEDORA_ROOTFS_MANIFEST": "../out/fedora-rootfs/rootfs.manifest",
@@ -13,5 +14,7 @@
   "SENSOR_STACK_SHA256": "REPLACE_WITH_sha256sum_OF_SENSOR_STACK_TAR",
   "POWER_SETTINGS_BINARY": "../out/gnome-control-center/gnome-control-center",
   "MKBOOTIMG_DIR": "local/aosp-mkbootimg",
-  "INSTALLER_IMG": "/path/to/liuqin-v0.2.0/installer.img"
+  "INSTALLER_IMG": "/path/to/liuqin-v0.2.0/installer.img",
+  "FINGERPRINT_BUNDLE": "local/downloads/fingerprint/v0.6.0/fingerprint-build-inputs.tar.gz",
+  "LIBFPRINT_TOD_TAR": "../out/liuqin-libfprint-tod-fedora/artifacts/libfprint-tod.tar.gz"
 }

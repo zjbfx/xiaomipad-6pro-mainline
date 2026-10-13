@@ -44,8 +44,8 @@ arch=${FEDORA_ARCH:-aarch64}
 # Workstation user expects come from the comps environment the workstation stage
 # installs, and an explicit list alone produces a working but empty shell.
 desktop_packages=${FEDORA_DESKTOP_PACKAGES:-"\
-NetworkManager NetworkManager-wifi bluez busybox chrony dbus-daemon dconf gdm gnome-control-center \
-gnome-initial-setup gnome-session gnome-settings-daemon gnome-shell iio-sensor-proxy \
+NetworkManager NetworkManager-wifi bluez busybox chrony dbus-daemon dconf fprintd fprintd-pam \
+gdm gnome-control-center gnome-initial-setup gnome-session gnome-settings-daemon gnome-shell iio-sensor-proxy \
 pipewire pipewire-pulseaudio wireplumber polkit util-linux shadow-utils \
 systemd-udev systemd-pam rpm dnf5 glib2 mesa-dri-drivers libdrm libinput xorg-x11-server-Xwayland \
 libcamera libcamera-ipa libcamera-tools libcamera-gstreamer snapshot v4l-utils \
@@ -66,6 +66,16 @@ gstreamer1-plugin-libav gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free
 #     -plugins-ugly-free rather than -plugins-ugly, and noopenh264 rather than
 #     the openh264 from the non-official fedora-cisco-openh264 repository that
 #     prepare_repos deliberately does not read.
+
+# The fingerprint packages are here for their glue, not their driver.  Fedora's
+# fprintd.service, its D-Bus activation and its polkit policy are what the
+# project's drop-in augments, and fprintd-pam is `pam_fprintd.so`, the PAM
+# module GDM calls -- the Ubuntu path names the same two things as `fprintd`
+# and `libpam-fprintd`.  Neither package's own driver set is used: the tablet's
+# sensor is reached through the project's own OEM TOD driver, and the daemon
+# that probes it is the project's fprintd, started by the drop-in's ExecStart
+# override.  Fedora's libfprint is pulled in as a dependency and stays as the
+# public API provider, with the TOD ABI library the port builds beside it.
 
 # dbus-daemon and systemd-pam are named explicitly because Fedora ships both as
 # weak dependencies, which install_weak_deps=False drops -- and a graphical
@@ -270,17 +280,29 @@ stage_preflight() {
 		/usr/libexec/liuqin-ssc-sample-gate \
 		/usr/bin/snapshot \
 		/usr/bin/cam \
-		/usr/bin/media-ctl; do
+		/usr/bin/media-ctl \
+		/usr/lib/systemd/system/fprintd.service \
+		/usr/lib64/security/pam_fprintd.so; do
 		# The project-owned half of this list is installed by the device layer,
 		# which runs after this stage; only the distro half is checked here.
 		case $path in
 		/usr/bin/gnome-shell | /usr/sbin/gdm | /usr/libexec/iio-sensor-proxy | \
 		/usr/bin/snapshot | /usr/bin/cam | /usr/bin/media-ctl | \
+		/usr/lib/systemd/system/fprintd.service | /usr/lib64/security/pam_fprintd.so | \
 		/usr/lib/systemd/systemd)
 			[ -e "$root$path" ] || die "missing from the Fedora tree: $path"
 			;;
 		esac
 	done
+	# Both fingerprint paths fail silently rather than loudly, so they are
+	# asserted here rather than left to the device layer: a root without
+	# fprintd.service leaves the project's drop-in in an empty directory, which
+	# systemd reads as no unit at all, and a root without pam_fprintd.so lets
+	# GDM fall back to the password prompt with nothing in the journal to say
+	# why.  The libraries themselves are not asserted here because the device
+	# layer lays them down: Fedora's libfprint arrives as a dependency of the
+	# two packages above, and the TOD ABI library beside it is a device-layer
+	# artifact this stage runs before.
 
 	[ -L "$root/usr/sbin/init" ] &&
 		[ "$(readlink "$root/usr/sbin/init")" = ../lib/systemd/systemd ] ||

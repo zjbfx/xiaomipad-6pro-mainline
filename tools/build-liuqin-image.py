@@ -68,8 +68,18 @@ INPUTS_FEDORA = {
     'FEDORA_ROOTFS_ROOT', 'FEDORA_ROOTFS_MANIFEST', 'FIRMWARE_POOL', 'FIRMWARE_TREE',
     'AUDIO_TOPOLOGY', 'WLAN_HSP2_TUPLE', 'STOCK_OVERLAY_DIR', 'STOCK_BASE_DIR',
     'SENSOR_STACK_TAR', 'SENSOR_STACK_SHA256', 'POWER_SETTINGS_BINARY',
-    'MKBOOTIMG_DIR', 'INSTALLER_IMG',
+    'MKBOOTIMG_DIR', 'INSTALLER_IMG', 'FINGERPRINT_BUNDLE', 'LIBFPRINT_TOD_TAR',
 }
+
+# Fedora needs one input Ubuntu does not: the libfprint TOD ABI library.  Fedora
+# publishes no such library at all -- its libfprint build has no tod/ directory
+# to build one from, and the whole +tod1 release line that does is what the
+# tablet's prebuilt driver links against -- so the port builds libfprint
+# 1.95.1+tod1 itself.  It is required rather than optional for the same reason
+# the bundle is: both are what the fingerprint layer is made of, and a root that
+# silently lost the library would fail at enrollment rather than here.  The
+# digest of the bundle is pinned inside it; this archive carries no digest
+# because the builder verifies its own contents before writing it.
 
 # The power panel (a gnome-control-center carrying the button-policy patch) is a
 # desktop convenience that no admission gate looks at.  The Fedora root
@@ -90,7 +100,8 @@ def main():
     parser.add_argument('--out', type=Path, default=project / 'out/image')
     parser.add_argument('--stage', choices=['all', 'modules', 'debs', 'device', 'copy', 'install',
                                           'assemble', 'preflight', 'manifest', 'boot', 'runtime',
-                                          'installer', 'pack', 'bundle', 'release-assets'],
+                                          'installer', 'pack', 'bundle', 'release-assets',
+                                          'fingerprint'],
                         default='all')
     parser.add_argument('--distro', choices=['ubuntu', 'fedora'], default='ubuntu',
                         help='Which userspace the root is assembled from (default: ubuntu)')
@@ -167,6 +178,12 @@ def main():
         stages.update({
             'copy': ('build-liuqin-fedora-native-root.sh', ['copy'], out / 'root'),
             'device': ('build-liuqin-fedora-native-root.sh', ['device'], out / 'root'),
+            # The fingerprint layer is a stage of its own here and not on the
+            # Ubuntu path, where it is package contents installed by `install`.
+            # It sits between the two it depends on and the ones that look at
+            # the finished tree: after `device`, whose kernel release record it
+            # is checked against, and before `assemble`, which links the units.
+            'fingerprint': ('build-liuqin-fedora-native-root.sh', ['fingerprint'], out / 'root'),
             'assemble': ('build-liuqin-fedora-native-root.sh', ['assemble'], out / 'root'),
             'preflight': ('build-liuqin-fedora-native-root.sh', ['preflight'], out / 'root'),
             'manifest': ('build-liuqin-fedora-native-root.sh', ['manifest'], out / 'root'),
@@ -185,6 +202,15 @@ def main():
             'pack': ('build-liuqin-native-root.sh', ['pack'], out / 'root'),
         })
     selected = [*stages, 'bundle'] if args.stage == 'all' else [args.stage]
+    # The two profiles share the --stage vocabulary but not every stage: the
+    # fingerprint layer is contents of a .deb on Ubuntu and a stage of its own
+    # on Fedora, and the installer stages are Ubuntu's alone.  Naming one the
+    # selected distro does not have is a mistake in the invocation, so it is
+    # reported as one rather than as the KeyError the lookup below would raise.
+    unknown = sorted(set(selected) - set(stages) - {'bundle'})
+    if unknown:
+        parser.error(f"--stage {' '.join(unknown)} is not part of the "
+                     f'{args.distro} assembly (it has: {", ".join(stages)})')
     if args.stage == 'all' and out.exists():
         parser.error('all requires a fresh output; resume with --stage instead')
     out.mkdir(parents=True, exist_ok=True)
@@ -281,11 +307,12 @@ def main():
                      'FINGERPRINT.zh-CN.md': project / 'docs/FINGERPRINT.zh-CN.md'}
             if 'FINGERPRINT_BUNDLE' in supplied:
                 # Native fingerprint support ships as its own bundle and is a
-                # required input on the Ubuntu path.  A distribution that does
-                # not carry the layer yet -- the Fedora port is one, until its
-                # libfprint-tod situation is settled -- supplies no such key,
-                # and the bundle has to assemble without it rather than fail on
-                # a missing entry the metadata already records as absent.
+                # required input on both paths.  The key is still tested rather
+                # than assumed: the two input tables are checked against the
+                # supplied object above, so an assembly that reaches here always
+                # has it, and a distribution-layer change that made it optional
+                # again would drop the archive rather than fail on a missing
+                # entry the metadata already records as absent.
                 files['fingerprint-build-inputs.tar.gz'] = Path(supplied['FINGERPRINT_BUNDLE'])
             if args.distro == 'fedora':
                 # The released installer.img carries an install-root.sh and a
@@ -350,6 +377,13 @@ def main():
             if not closure.is_dir():
                 parser.error('FIRMWARE_TREE carries no firmware closure: ' + str(closure))
             stage_env['FIRMWARE_POOL'] = str(closure)
+            # The fingerprint stage's two inputs are named here rather than left
+            # to the caller's environment: this script is what resolves the
+            # input file, so exporting them separately would let the two
+            # disagree, and the stage would install a library from one root's
+            # build into another root's tree.
+            stage_env['FINGERPRINT_BUNDLE'] = str(supplied['FINGERPRINT_BUNDLE'])
+            stage_env['LIBFPRINT_TOD_TAR'] = str(supplied['LIBFPRINT_TOD_TAR'])
         if stage == 'installer':
             stage_env['INSTALLER_RUNTIME'] = str(out / 'installer-runtime')
         subprocess.run(['python3' if script.endswith('.py') else 'sh',

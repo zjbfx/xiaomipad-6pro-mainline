@@ -214,6 +214,9 @@ sudo dnf install -y qemu-user-static gcc-aarch64-linux-gnu dtc ccache \
 - `POWER_SETTINGS_BINARY`：**可选** —— 不提供则只警告，产出的平板能正常启动，只是设置面板里没有电源键策略项
 - `MKBOOTIMG_DIR`：AOSP mkbootimg 脚本（`tools/fetch-aosp-mkbootimg.sh`）
 - `INSTALLER_IMG`：已发布安装包里的 `installer.img`
+- `FINGERPRINT_BUNDLE`：项目自己发布的 `fingerprint-build-inputs.tar.gz`（与 Ubuntu 路径同一个文件，
+  不是本仓库的构建产物）
+- `LIBFPRINT_TOD_TAR`：下面第 4 步的产物（Fedora 侧独有，必填）
 
 ## 构建
 
@@ -227,12 +230,56 @@ RELEASE_DIR=~/project/miPad6pro/liuqin-v0.2.0 sh tools/import-liuqin-release-ker
 
 # 3. 输入清单：照 tools/fedora-inputs.example.json 填一份到 tools/local/fedora-inputs.json
 
-# 4. 设备层装配 → boot.img → bundle（每阶段单独可重跑，全部需要 root）
-for s in copy device assemble preflight manifest pack boot bundle; do
+# 4. libfprint TOD ABI 库（Fedora 没有这个包，只能自己编译；见下节）
+sudo sh tools/build-liuqin-fedora-libfprint-tod.sh
+#    产出 out/liuqin-libfprint-tod-fedora/artifacts/libfprint-tod.tar.gz
+#    这就是输入清单里的 LIBFPRINT_TOD_TAR；源码已缓存在 tools/local/downloads/libfprint/
+
+# 5. 设备层装配 → boot.img → bundle（每阶段单独可重跑，全部需要 root）
+for s in copy device fingerprint assemble preflight manifest pack boot bundle; do
   sudo python3 tools/build-liuqin-image.py --inputs tools/local/fedora-inputs.json \
     --kernel-out out/kernel-from-release --out out/image --distro fedora --stage "$s" || break
 done
 ```
+
+### 指纹层：为什么 Fedora 比 Ubuntu 多一步
+
+Ubuntu 侧指纹是一个 `.deb`，它依赖 `libfprint-2-tod1` —— 那个包提供
+`libfprint-2-tod.so.1`，平板上的原厂驱动、`fpc-oem-print` 客户端和 `fprintd` 都带着这行
+`NEEDED`。Fedora **没有这个包，也配不出这个包**：`dnf repoquery --whatprovides
+libfprint-2-tod.so.1` 对官方源为空，而 Fedora 用的上游普通发布里根本没有
+`libfprint/tod/` 目录 —— TOD 这套 ABI 只存在于另一条 `+tod1` 发布线（`-Dtod` 选项默认是
+true，但没有 tod 源码的树里它无事可做）。
+
+所以端口自己编译它：源码就是项目源码锁里记的那个修订版本（`1.95.1+tod1`，摘要写在
+脚本里），也就是原厂二进制当初编译时用的那一个 —— ABI 是靠"同一个源码"对上的，而不是
+靠两个上游版本碰巧一致。**两个库一起编、一起装**：`libfprint/tod/meson.build` 用
+`link_whole` 把整个 libfprint 私有实现链进了 TOD 库，所以一个修订版本的 TOD 库配另一个
+修订版本的 `libfprint-2`，等于把同一份核心塞进同一个进程两次 —— 单位是这一对，不是单个
+文件。
+
+编译在 Fedora 根的可写 overlay 上跑 chroot（与 `build-liuqin-sensors-stack.sh` 同一套机制），
+发行版树是只读 lowerdir，包管理器和编译器都改不到发布根。产物
+`out/liuqin-libfprint-tod-fedora/artifacts/libfprint-tod.tar.gz` 只装三个运行时文件；
+`.so` 开发符号链接、pkgconfig、头文件、gir、udev 规则和 hwdb 都不搬 —— Fedora 的
+`libfprint` 包仍然装着，重复的文件会变成第二个属主。
+
+驱动目录不用打补丁：`FP_TOD_DRIVERS_DIR` 环境变量本来就覆盖编译进库的常量
+（`tod-shared-loader.c`），项目那份 drop-in 已经指向
+`/usr/local/lib/liuqin-fpc-oem/tod`。
+
+### 内核版本这一条是硬约束
+
+指纹模块是按 **单个内核 release** 钉死的（vermagic），`stable_module.py` 在 `insmod`
+之前会拿运行中的内核版本比对，而随包发布的二进制只在提交 `fe81794b5e1b` 上编译过。
+`fingerprint` 阶段会把这个记录和根里的 `usr/share/liuqin/kernel.release` 对比，
+不一致就拒绝装配并同时打印两个版本号 —— 这一步放在任何落盘之前，所以拒绝之后不会留下
+半装的树。
+
+后果：**Fedora 根的内核必须编译在 `fe81794b5e1b`**（也就是 `liuqin-6.17` 分支上的那个
+提交），不能用 `liuqin-quiet-bootargs` 分支的顶端（`3fabcf1aa32c`）—— 后者的 vermagic 是
+`6.17.0-rc1-g3fabcf1aa32c`，装上去会在第一次登录时静默失败。要同时要安静启动参数，就
+把那个提交 rebase 到 `fe81794b5e1b` 之上再编译。
 
 产物在 `out/image/bundle/`：`boot.img`、复用的 `installer.img`、`rootfs.tar.gz`、`install.py` 与清单文件。
 
@@ -266,7 +313,7 @@ sh tests/persistent-root.sh                          # 准入机制的 fail-clos
 | 类别 | 内容 | 状态 |
 |---|---|---|
 | 与发行版无关 | systemd 单元、固件、电源键/亮度守护进程、dconf 锁、UCm2 | ✅ 已由装配器安装 |
-| 项目自建、装在 `/usr/local` | 传感器代理链路、辅助脚本 | ✅ 已由装配器安装（需要 `SENSOR_STACK_TAR` 输入） |
+| 项目自建、装在 `/usr/local` | 传感器代理链路、辅助脚本、指纹运行时 | ✅ 已由装配器安装（需要 `SENSOR_STACK_TAR`、`FINGERPRINT_BUNDLE` 输入） |
 | **修改发行版自带软件** | 打过补丁的 `gnome-control-center`、覆盖 `iio-sensor-proxy` | ⬜ **待移植** |
 
 第三类里：
@@ -288,6 +335,15 @@ sh tests/persistent-root.sh                          # 准入机制的 fail-clos
 4. **Snap 遗留文件（清理项，不影响启动）** —— 设备层里还带着 `liuqin-snap-root-admission`
    脚本与其 unit。Fedora 没有 snapd，它**没有被链进 `basic.target`**（`assemble` 阶段会拒绝
    那种情况），所以只是 Ubuntu 形状的死代码，v2 从设备层删掉即可。
+5. **指纹层（已移植，比 Ubuntu 多一步）** —— 设备层文件与 Ubuntu 完全同源：`fingerprint`
+   阶段调用的是 `.deb` 构建器自己的 `read_bundle` / `prepare_payload` / `stage_root`
+   三个函数（`tools/lib/stage-fingerprint-root.py`），包装壳去掉，校验一行没少。
+   多出来的是 `libfprint-2-tod.so.1`（Fedora 不提供，见上文"指纹层"一节）和一条内核版本
+   硬约束。这两个发行版共用的另外两件事也要在位：Fedora 根里的
+   `/usr/lib/systemd/system/fprintd.service` 与 `/usr/lib64/security/pam_fprintd.so`
+   （分别来自 `fprintd` 和 `fprintd-pam` 包），根构建阶段会断言它们存在 —— 缺前者时项目
+   的 drop-in 落进一个空目录，systemd 读作"根本没有这个单元"；缺后者时 GDM 静默退回密码
+   登录，日志里什么都不留。这两个都是**安静失败**，所以在这里断言而不是留给设备层。
 
 准入门禁要求的 `/usr/libexec/iio-sensor-proxy` 和 `/usr/bin/hexagonrpcd` 由第 1 项提供；
 在它验证通过之前，Fedora 装配器产出的根会被准入拒绝 —— 这是刻意的：宁可在主机上失败。
