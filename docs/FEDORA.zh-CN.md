@@ -41,6 +41,13 @@ Firefox、LibreOffice、文档与图片查看器…），再叠加本项目的�
 
 ### 复用发布版 `installer.img` 的两个覆盖项
 
+**镜像必须与内核同版本，不能随手拿一份旧的。** `install.py` 把 RAM 安装器引导起来后的第一件事
+就是比对它的 `uname -r` 和 bundle 记录的 `kernel_release`，不一致立刻中止 —— 此时还没动任何
+分区，但这一趟也就白跑了。v0.2.0 的 `installer.img` 内核是 `6.17.0-rc1-gb07784536640`，配
+v0.6.0 内核的包会被直接拒。取**同一份发布版**里的 `installer.img`
+（v0.6.0：`80c64d5a4f7d15ba4b260a41bc3b55dbc03b2b81dafdc42554f50488595e984a`，与发布版
+`SHA256SUMS` 一致），这就是 `INSTALLER_IMG` 要指的文件。
+
 发布的 `installer.img` 里内嵌着**它自己那一版**的安装脚本和根契约。这两样都不是发行版中立的：
 脚本里带着当时的准入检查，契约里钉着当时那份根的哈希。Fedora 根两样都对不上，安装会在最后两步被拒。
 
@@ -208,7 +215,10 @@ sudo dnf install -y qemu-user-static gcc-aarch64-linux-gnu dtc ccache \
 - `FIRMWARE_POOL`：原厂固件池（首启 initramfs 读的那份）
 - `FIRMWARE_TREE`：`build-liuqin-firmware-prep.sh` 产出的固件树；根装配器从它取 `usr/lib/firmware` 闭包
 - `STOCK_OVERLAY_DIR` / `STOCK_BASE_DIR`：DTBO 条目与 vendor_boot DTB
-- `AUDIO_TOPOLOGY`：编译好的 AudioReach 拓扑
+- `AUDIO_TOPOLOGY`：AudioReach 拓扑。**不要**用旧发布版里那份：上游为板载话筒采集链
+  重建过拓扑，initramfs 构建器和固件准备脚本现在都按新哈希（`9c9f8bfc…`）把关，旧文件
+  会被直接拒掉（报 `AudioReach topology identity mismatch`）；按下面第 3 步从 v0.6.0 的
+  `boot.img` 里恢复
 - `WLAN_HSP2_TUPLE`：准备好的 WLAN 固件组合
 - `SENSOR_STACK_TAR`：见下方"还差什么"
 - `POWER_SETTINGS_BINARY`：**可选** —— 不提供则只警告，产出的平板能正常启动，只是设置面板里没有电源键策略项
@@ -216,7 +226,7 @@ sudo dnf install -y qemu-user-static gcc-aarch64-linux-gnu dtc ccache \
 - `INSTALLER_IMG`：已发布安装包里的 `installer.img`
 - `FINGERPRINT_BUNDLE`：项目自己发布的 `fingerprint-build-inputs.tar.gz`（与 Ubuntu 路径同一个文件，
   不是本仓库的构建产物）
-- `LIBFPRINT_TOD_TAR`：下面第 4 步的产物（Fedora 侧独有，必填）
+- `LIBFPRINT_TOD_TAR`：下面第 5 步的产物（Fedora 侧独有，必填）
 
 ## 构建
 
@@ -225,17 +235,30 @@ sudo dnf install -y qemu-user-static gcc-aarch64-linux-gnu dtc ccache \
 sudo OUT_DIR="$PWD/out/fedora-rootfs" sh tools/build-liuqin-fedora-rootfs.sh all
 
 # 2. 内核层（复用已发布内核，不再重新编译）
-RELEASE_DIR=~/project/miPad6pro/liuqin-v0.2.0 sh tools/import-liuqin-release-kernel.sh
+#    这里的版本号是硬约束：必须用 v0.6.0。指纹模块按 vermagic 钉在
+#    6.17.0-rc1-gfe81794b5e1b，只有 v0.6.0 的 bundle.json 记录这个 commit，
+#    kernel/source.json 也钉的是它；换成别的发布版会得到另一个 kernelrelease，
+#    指纹层铺进去时会被内核版本交叉检查拦下（见「内核版本这一条是硬约束」）。
+RELEASE_DIR=~/project/miPad6pro/liuqin-v0.6.0 sh tools/import-liuqin-release-kernel.sh
 #    产出 out/kernel-from-release/：Image、模块树、DTB、build-info.json、SHA256SUMS
 
-# 3. 输入清单：照 tools/fedora-inputs.example.json 填一份到 tools/local/fedora-inputs.json
+# 3. AudioReach 拓扑（上游为话筒采集链重建过它，v0.2.0 那份已经过期）
+#    上游的常规做法是用 tools/build-liuqin-audio-topology.sh 从 AudioReach 源码重编，
+#    需要 alsatplg 和一个钉在 2af1f1e 的 linux-msm/audioreach-topology 检出；
+#    不编 AudioReach 的机器上，从发布包恢复等价的一份：
+RELEASE_DIR=~/project/miPad6pro/liuqin-v0.6.0 sh tools/import-liuqin-release-topology.sh
+#    产出 out/topology-from-release/：拓扑本体、topology.identity、SHA256SUMS
+#    脚本自己核对两个构建器里的哈希字面量，对不上就退出；这就是输入清单里的
+#    AUDIO_TOPOLOGY（注意不是 out/from-release-firmware/topology/ 里那份）
 
-# 4. libfprint TOD ABI 库（Fedora 没有这个包，只能自己编译；见下节）
+# 4. 输入清单：照 tools/fedora-inputs.example.json 填一份到 tools/local/fedora-inputs.json
+
+# 5. libfprint TOD ABI 库（Fedora 没有这个包，只能自己编译；见下节）
 sudo sh tools/build-liuqin-fedora-libfprint-tod.sh
 #    产出 out/liuqin-libfprint-tod-fedora/artifacts/libfprint-tod.tar.gz
 #    这就是输入清单里的 LIBFPRINT_TOD_TAR；源码已缓存在 tools/local/downloads/libfprint/
 
-# 5. 设备层装配 → boot.img → bundle（每阶段单独可重跑，全部需要 root）
+# 6. 设备层装配 → boot.img → bundle（每阶段单独可重跑，全部需要 root）
 for s in copy device fingerprint assemble preflight manifest pack boot bundle; do
   sudo python3 tools/build-liuqin-image.py --inputs tools/local/fedora-inputs.json \
     --kernel-out out/kernel-from-release --out out/image --distro fedora --stage "$s" || break

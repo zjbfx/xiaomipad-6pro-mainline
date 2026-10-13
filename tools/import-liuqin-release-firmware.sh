@@ -89,6 +89,13 @@ b2d3f0e2a98fd6259ab9ffef16df63265542e6cc9a970d53d476e823d432042a  gmu_gen70000.b
 dsp_set=7f9b43d3815b6592f541e0b870357010488980bc040b925e93bbf12d01282908
 a730_zap_sha=36296b019753fbb2a4733450a2d0a94e307238227297a747d0ff2811364f5d5f
 vpu_sha=3567fd4522323b132ae4dd0f94a34782b2bc6a8c5c5fb51edfdbe364450fc118
+# The topology pin below is the one this release was built with, and it is no
+# longer the one the project builds with: upstream rebuilt the payload for the
+# onboard microphone capture chain, and build-liuqin-firmware-prep.sh and
+# tools/lib/build-initramfs.sh both moved to the new hash.  Recovering this
+# release's topology therefore yields bytes the current assembly rejects --
+# import it with tools/import-liuqin-release-topology.sh from a v0.6.0 boot.img
+# instead, and treat this file as the pool/tuple/vpu recovery it also is.
 topology_sha=dff0c8af945c66d542a004931af66435966cee12c6c430d0fa0610c6d3d5d126
 tuple_sha256="\
 amss.bin:cc3e477fa698a28bdb8c8115a071893f9b2f5230de190ad525e74fd69bbb6092

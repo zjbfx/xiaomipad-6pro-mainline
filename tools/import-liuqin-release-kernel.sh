@@ -26,8 +26,12 @@
 # the boot image step compares its own DTB against these bytes, which is what
 # makes the locally built dtc, fdtoverlay and device tree trustworthy.
 #
-#   RELEASE_DIR=~/project/miPad6pro/liuqin-v0.2.0 \
+#   RELEASE_DIR=~/project/miPad6pro/liuqin-v0.6.0 \
 #   sh tools/import-liuqin-release-kernel.sh
+#
+# v0.6.0 rather than any other release: the fingerprint module is vermagic-pinned
+# to 6.17.0-rc1-gfe81794b5e1b, which is the commit this release's bundle.json
+# records and the one kernel/source.json locks.
 #
 # Outputs, all under OUT_DIR (the KERNEL_OUT the boot builder consumes):
 #   arch/arm64/boot/Image                          KERNEL_IMAGE
