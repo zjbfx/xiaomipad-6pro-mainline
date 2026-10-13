@@ -47,7 +47,25 @@ desktop_packages=${FEDORA_DESKTOP_PACKAGES:-"\
 NetworkManager NetworkManager-wifi bluez busybox chrony dbus-daemon dconf gdm gnome-control-center \
 gnome-initial-setup gnome-session gnome-settings-daemon gnome-shell iio-sensor-proxy \
 pipewire pipewire-pulseaudio wireplumber polkit util-linux shadow-utils \
-systemd-udev systemd-pam rpm dnf5 glib2 mesa-dri-drivers libdrm libinput xorg-x11-server-Xwayland"}
+systemd-udev systemd-pam rpm dnf5 glib2 mesa-dri-drivers libdrm libinput xorg-x11-server-Xwayland \
+libcamera libcamera-ipa libcamera-tools libcamera-gstreamer snapshot v4l-utils \
+gstreamer1-plugin-libav gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free"}
+
+# The camera path is image content, not a dependency of anything the device
+# layer installs, and the Ubuntu path states the same thing the same way: it
+# pulls these in a chroot install rather than from a package's dependencies, so
+# removing the camera application can never take a device unit with it.
+#   * snapshot is what /usr/local/bin/liuqin-camera execs.
+#   * libcamera carries the software ISP the rear S5KJN1 goes through;
+#     libcamera-ipa is the IPA modules it loads and libcamera-tools is the
+#     `cam` command docs/CAMERA.md tells users to run.
+#   * libcamera-gstreamer is Fedora's libgstlibcamera.so, the element the
+#     Ubuntu list gets from gstreamer1.0-libcamera.
+#   * libav carries the H.264 decoder Snapshot records and plays back with;
+#     the Compose/Encode side is Fedora's patent-free subset on purpose --
+#     -plugins-ugly-free rather than -plugins-ugly, and noopenh264 rather than
+#     the openh264 from the non-official fedora-cisco-openh264 repository that
+#     prepare_repos deliberately does not read.
 
 # dbus-daemon and systemd-pam are named explicitly because Fedora ships both as
 # weak dependencies, which install_weak_deps=False drops -- and a graphical
@@ -249,11 +267,15 @@ stage_preflight() {
 		/usr/local/libexec/liuqin-power-key-action \
 		/usr/local/sbin/liuqin-bt-public-addr \
 		/usr/local/sbin/liuqin-wlan-mac \
-		/usr/libexec/liuqin-ssc-sample-gate; do
+		/usr/libexec/liuqin-ssc-sample-gate \
+		/usr/bin/snapshot \
+		/usr/bin/cam \
+		/usr/bin/media-ctl; do
 		# The project-owned half of this list is installed by the device layer,
 		# which runs after this stage; only the distro half is checked here.
 		case $path in
 		/usr/bin/gnome-shell | /usr/sbin/gdm | /usr/libexec/iio-sensor-proxy | \
+		/usr/bin/snapshot | /usr/bin/cam | /usr/bin/media-ctl | \
 		/usr/lib/systemd/systemd)
 			[ -e "$root$path" ] || die "missing from the Fedora tree: $path"
 			;;
