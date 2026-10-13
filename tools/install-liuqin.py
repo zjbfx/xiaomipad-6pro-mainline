@@ -737,14 +737,21 @@ def bundle_handler(bundle, extra):
 def confirm_plan(expected, actual):
     """What was confirmed and what will be written must be the same decision.
 
-    Only the sizes the operator chose are compared.  linux_home is the
-    remainder by definition, so its size legitimately follows the capacity of
-    the tablet in front of us rather than the preview's reference geometry.
+    Only the sizes the operator chose are compared.  Two sizes belong to the
+    tablet rather than to the operator, and both legitimately differ from the
+    preview's reference geometry: linux_home is the remainder by definition,
+    and a 'delete' entry's size is the extent of the partition being removed --
+    which is exactly what the 128 GB and 512 GB capacity variants change, while
+    the documented identity checks (partition name, block size, a userdata of
+    at least 16 GiB) still hold.  The layout itself is recomputed from the
+    tablet's own table either way, so this comparison still catches a shape
+    that is not the confirmed one.
     """
     if [item.name for item in expected.entries] != [item.name for item in actual.entries]:
         raise RuntimeError('the computed layout has a different shape from the confirmed one')
     for one, two in zip(expected.entries, actual.entries):
-        if one.action != two.action or (one.name != layout.HOME_NAME and one.size != two.size):
+        if one.action != two.action or (one.action != 'delete'
+                                        and one.name != layout.HOME_NAME and one.size != two.size):
             raise RuntimeError(
                 'the tablet\'s partition table does not produce the layout that was confirmed '
                 f'({one.name}: {one.action} {one.size} confirmed, {two.action} {two.size} '
